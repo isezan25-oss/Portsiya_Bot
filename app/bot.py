@@ -229,6 +229,13 @@ async def cmd_help(m: Message):
 
 
 async def main():
+    # Локально токен лежит в .env; на Railway он приходит из Variables,
+    # и python-dotenv там не нужен — отсюда мягкий импорт.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     token = os.environ["BOT_TOKEN"]
     db.init()
     bot = Bot(token=token)

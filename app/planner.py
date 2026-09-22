@@ -16,6 +16,17 @@ DATA = Path(__file__).resolve().parent.parent / "data"
 SCALE_MIN, SCALE_MAX, SCALE_STEP = 0.75, 1.40, 0.05
 TOL_KCAL_PCT, TOL_KCAL_ABS = 0.05, 75
 TOL_PROTEIN_LO, TOL_PROTEIN_HI = -0.05, 0.15
+# Жиры: ±20% по спецификации, раздел 5.3. Верхняя граница в коде отсутствовала —
+# отсюда и брался перекос: калории и белок были зажаты допусками, жир оставался
+# свободным, углеводы схлопывались ему навстречу. Замер на 130 планах до правки:
+# жир 1.40 нормы по медиане, 2.91 в худшем случае, углеводы 0.77 нормы.
+# Цена соблюдения: 2 профиля из 130 (атлеты на наборе, 3800+ ккал) остаются без
+# плана. Поднять до 1.35 — покрытие 100%, но жир до 1.35 нормы.
+TOL_FAT_LO, TOL_FAT_HI = 0.80, 1.20
+# Штраф в score за отклонение жиров от нормы. Покрытие не трогает: набор
+# допустимых планов тот же, меняется только порядок. 0.5 подобрано как
+# наименьшее значение, дающее эффект и не перебивающее штраф за повтор блюда.
+FAT_SCORE_PENALTY = 0.5
 
 MEAL_ORDER = ["breakfast", "lunch", "dinner", "snack", "snack2"]
 MEAL_RU = {"breakfast": "Завтрак", "lunch": "Обед",
@@ -229,7 +240,7 @@ def build_plan(targets: Targets, recipes: list[Recipe], addons: list[Addon],
             if not (TOL_PROTEIN_LO <= dev <= TOL_PROTEIN_HI):
                 continue
             fat = sum(r.fat * s for r, s in zip(combo, scales)) + addon.fat
-            if fat < targets.fat_g * 0.8:
+            if not (targets.fat_g * TOL_FAT_LO <= fat <= targets.fat_g * TOL_FAT_HI):
                 continue
 
             scaled = [PlanItem(recipe=r, meal=slot, scale=s)
@@ -245,6 +256,7 @@ def build_plan(targets: Targets, recipes: list[Recipe], addons: list[Addon],
                            if i.recipe.cook_min not in ("", None)
                            and _f(i.recipe.cook_min) > max_cook_min)
                 score -= 10 * over
+            score -= FAT_SCORE_PENALTY * abs(fat / targets.fat_g - 1.0) * 100
             mains = [i.recipe.title.split()[0].lower() for i in scaled]
             score -= 10 * (len(mains) - len(set(mains)))
 
