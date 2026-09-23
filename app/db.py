@@ -3,11 +3,17 @@
 DDL совместим, меняется только строка подключения и драйвер.
 """
 import json
+import os
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "bot.db"
+# По умолчанию база лежит рядом с рецептами, в data/. На Railway это не годится:
+# том монтируется пустым и перекрывает каталог целиком, то есть recipes.csv и
+# addons.csv исчезли бы вместе с ним. Поэтому том монтируется в отдельный
+# каталог, а путь задаётся переменной DB_PATH — см. docs/03-деплой.md, этап 4.
+DB_PATH = Path(os.environ.get("DB_PATH")
+               or Path(__file__).resolve().parent.parent / "data" / "bot.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (

@@ -9,7 +9,7 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .core import Targets
+from .core import MEAL_SPLIT, Targets
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -27,6 +27,14 @@ TOL_FAT_LO, TOL_FAT_HI = 0.80, 1.20
 # допустимых планов тот же, меняется только порядок. 0.5 подобрано как
 # наименьшее значение, дающее эффект и не перебивающее штраф за повтор блюда.
 FAT_SCORE_PENALTY = 0.5
+# Штраф за отклонение долей приёмов от MEAL_SPLIT. Допуски проверяют только итог
+# за день, поэтому раскладка разъезжалась: замер на 130 планах до правки —
+# обед 30% при заложенных 35%, ужин 34% при 30%, перекус p90 22% при 10%
+# и до 26% в худшем случае. Жёсткие коридоры стоили бы покрытия (±50% — 94.6%,
+# ±20% — 80.8%), штраф же не трогает набор допустимых планов, только порядок.
+# Выше 3 не поднимать: сумма отклонений типично 0.15–0.25, то есть при k=12 штраф
+# доходит до 300 очков и перебивает и повтор блюда (15), и близость к норме жиров.
+MEAL_SCORE_PENALTY = 1.0
 
 MEAL_ORDER = ["breakfast", "lunch", "dinner", "snack", "snack2"]
 MEAL_RU = {"breakfast": "Завтрак", "lunch": "Обед",
@@ -196,6 +204,7 @@ def build_plan(targets: Targets, recipes: list[Recipe], addons: list[Addon],
     recent = recent_ids or set()
     prefer = [t.lower() for t in (prefer_tags or [])]
     slots = MEAL_ORDER[:meals] if meals != 5 else MEAL_ORDER[:5]
+    split = MEAL_SPLIT[len(slots)]
 
     pools = {}
     for slot in slots:
@@ -257,6 +266,11 @@ def build_plan(targets: Targets, recipes: list[Recipe], addons: list[Addon],
                            and _f(i.recipe.cook_min) > max_cook_min)
                 score -= 10 * over
             score -= FAT_SCORE_PENALTY * abs(fat / targets.fat_g - 1.0) * 100
+            # доли считаются от суммы приёмов: добавка не привязана к приёму
+            meal_kcal = kcal - addon.kcal
+            score -= MEAL_SCORE_PENALTY * 100 * sum(
+                abs(r.kcal * s / meal_kcal - split[slot][0])
+                for slot, r, s in zip(slots, combo, scales))
             mains = [i.recipe.title.split()[0].lower() for i in scaled]
             score -= 10 * (len(mains) - len(set(mains)))
 
