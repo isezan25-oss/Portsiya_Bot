@@ -129,6 +129,19 @@ def get_plan(tg_id: int, plan_date: date) -> dict | None:
     return json.loads(row["payload"]) if row else None
 
 
+def accept_plan(tg_id: int, plan_date: date) -> None:
+    """План принят: рецепты выданы, замена на сегодня больше не предлагается."""
+    with connect() as c:
+        row = c.execute("SELECT payload FROM plans WHERE telegram_id=? AND plan_date=?",
+                        (tg_id, plan_date.isoformat())).fetchone()
+        if not row:
+            return
+        payload = json.loads(row["payload"])
+        payload["accepted"] = True
+        c.execute("UPDATE plans SET payload=? WHERE telegram_id=? AND plan_date=?",
+                  (json.dumps(payload, ensure_ascii=False), tg_id, plan_date.isoformat()))
+
+
 def recent_recipe_ids(tg_id: int, days: int = 5) -> set[str]:
     since = (date.today() - timedelta(days=days)).isoformat()
     with connect() as c:

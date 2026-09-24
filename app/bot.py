@@ -19,7 +19,7 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, KeyboardButton, Message,
                            ReplyKeyboardMarkup)
 
-from . import db
+from . import db, recipes
 from .core import ACTIVITY, NotEligible, Profile, calculate
 from .planner import (format_plan, load_addons, load_recipes,
                       filter_recipes, relax_and_build)
@@ -385,7 +385,7 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None):
         text += "\n\n" + "\n".join(f"_{n}_" for n in notes)
     db.save_plan(tg_id, date.today(), [i.recipe.id for i in plan.items], text)
     await m.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb(
-        [[("Другой вариант", "replan")]]))
+        [[("Другой вариант", "replan")], [("📖 Прислать рецепты", "recipes")]]))
 
 
 @dp.message(Command("plan"))
@@ -396,7 +396,38 @@ async def cmd_plan(m: Message):
 @dp.callback_query(F.data == "replan")
 async def cb_replan(c: CallbackQuery):
     import random
+    saved = db.get_plan(c.from_user.id, date.today())
+    if saved and saved.get("accepted"):
+        return await c.answer(
+            "Рецепты на сегодня уже выданы — менять план можно до этого. "
+            "Новый план будет завтра.", show_alert=True)
     await _send_plan(c.message, c.from_user.id, seed=random.randint(1, 10 ** 6))
+    await c.answer()
+
+
+@dp.callback_query(F.data == "recipes")
+async def cb_recipes(c: CallbackQuery):
+    saved = db.get_plan(c.from_user.id, date.today())
+    if not saved:
+        return await c.answer("Сначала соберите план.", show_alert=True)
+
+    db.accept_plan(c.from_user.id, date.today())
+    titles = {r.id: r.title for r in RECIPES}
+    sent = 0
+    for rid in saved["recipe_ids"]:
+        text = recipes.card(rid)
+        if not text:
+            # продукты вроде «Яблоко, 1 шт.» — готовить нечего
+            continue
+        for part in recipes.chunks(text):
+            await c.message.answer(part)
+        sent += 1
+    simple = [titles.get(r, r) for r in saved["recipe_ids"] if not recipes.card(r)]
+    tail = ("\n\nБез рецепта: " + ", ".join(simple) + " — готовить нечего.") if simple else ""
+    await c.message.answer(
+        f"Это все рецепты на сегодня ({sent}).{tail}\n\n"
+        f"План на сегодня зафиксирован — заменить блюда уже нельзя. "
+        f"Новый план соберётся завтра.")
     await c.answer()
 
 
