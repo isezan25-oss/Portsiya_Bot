@@ -12,7 +12,9 @@ from pathlib import Path
 # том монтируется пустым и перекрывает каталог целиком, то есть recipes.csv и
 # addons.csv исчезли бы вместе с ним. Поэтому том монтируется в отдельный
 # каталог, а путь задаётся переменной DB_PATH — см. docs/03-деплой.md, этап 4.
+_VOLUME = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
 DB_PATH = Path(os.environ.get("DB_PATH")
+               or (Path(_VOLUME) / "bot.db" if _VOLUME else None)
                or Path(__file__).resolve().parent.parent / "data" / "bot.db")
 
 SCHEMA = """
