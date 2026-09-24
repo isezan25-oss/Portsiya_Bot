@@ -1,6 +1,7 @@
 """
 Telegram-бот. aiogram 3.
-Команды: /start /plan /replace /profile /delete /help
+Команды: /start /plan /replace /profile /restart /delete /help
+Постоянная клавиатура: план, профиль, помощь.
 ИИ не используется — весь подбор детерминированный.
 """
 import asyncio
@@ -14,8 +15,9 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (CallbackQuery, InlineKeyboardButton,
-                           InlineKeyboardMarkup, Message)
+from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
+                           InlineKeyboardMarkup, KeyboardButton, Message,
+                           ReplyKeyboardMarkup)
 
 from . import db
 from .core import ACTIVITY, NotEligible, Profile, calculate
@@ -43,6 +45,17 @@ GOAL_RU = {"cut": "Снизить процент жира", "maintain": "Уде�
            "bulk": "Набрать мышечную массу"}
 
 
+BTN_PLAN = "🍽 План на сегодня"
+BTN_PROFILE = "👤 Мой профиль"
+BTN_HELP = "❓ Помощь"
+
+MAIN_KB = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=BTN_PLAN)],
+              [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_HELP)]],
+    resize_keyboard=True,
+)
+
+
 class Onboarding(StatesGroup):
     sex = State()
     age = State()
@@ -61,9 +74,7 @@ def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
 dp = Dispatcher(storage=MemoryStorage())
 
 
-@dp.message(Command("start"))
-async def cmd_start(m: Message, state: FSMContext):
-    db.ensure_user(m.from_user.id)
+async def _ask_sex(m: Message, state: FSMContext):
     await state.set_state(Onboarding.sex)
     await m.answer(
         "Привет! Я соберу для вас план питания под ваши параметры — "
@@ -73,6 +84,46 @@ async def cmd_start(m: Message, state: FSMContext):
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([[("Женский", "sex:female"), ("Мужской", "sex:male")]]),
     )
+
+
+@dp.message(Command("start"))
+async def cmd_start(m: Message, state: FSMContext):
+    db.ensure_user(m.from_user.id)
+    row = db.get_profile(m.from_user.id)
+    if row:
+        # Профиль уже заполнен — не гонять человека по шести вопросам заново.
+        await state.clear()
+        return await m.answer(
+            f"С возвращением. Ваша норма: *{row['target_kcal']} ккал*, "
+            f"Б {row['protein_g']} · Ж {row['fat_g']} · У {row['carb_g']}.\n\n"
+            f"Нажмите «{BTN_PLAN}» — соберу меню на сегодня.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=MAIN_KB)
+    await _ask_sex(m, state)
+
+
+@dp.message(Command("restart"))
+async def cmd_restart(m: Message, state: FSMContext):
+    db.ensure_user(m.from_user.id)
+    await _ask_sex(m, state)
+
+
+@dp.message(F.text == BTN_PLAN)
+async def btn_plan(m: Message, state: FSMContext):
+    await state.clear()
+    await _send_plan(m, m.from_user.id)
+
+
+@dp.message(F.text == BTN_PROFILE)
+async def btn_profile(m: Message, state: FSMContext):
+    await state.clear()
+    await cmd_profile(m)
+
+
+@dp.message(F.text == BTN_HELP)
+async def btn_help(m: Message, state: FSMContext):
+    await state.clear()
+    await cmd_help(m)
 
 
 @dp.callback_query(Onboarding.sex, F.data.startswith("sex:"))
@@ -142,9 +193,13 @@ async def on_goal(c: CallbackQuery, state: FSMContext):
         f"Готово. Ваша норма:\n\n"
         f"*{t.kcal} ккал* в день\n"
         f"Белки {t.protein_g} г · Жиры {t.fat_g} г · Углеводы {t.carb_g} г\n"
-        f"Клетчатка {t.fiber_g} г · Вода {t.water_ml} мл{notes}\n\n"
-        f"Теперь /plan — и я соберу меню на сегодня.",
+        f"Клетчатка {t.fiber_g} г · Вода {t.water_ml} мл{notes}",
         parse_mode=ParseMode.MARKDOWN)
+    # Клавиатуру нельзя прицепить к отредактированному сообщению — шлём отдельным.
+    await c.message.answer(
+        f"Профиль сохранён, второй раз заполнять не придётся.\n"
+        f"Нажмите «{BTN_PLAN}» — соберу меню на сегодня.",
+        reply_markup=MAIN_KB)
     await c.answer()
 
 
@@ -159,7 +214,8 @@ def _targets_from_row(row: dict):
 async def _send_plan(m: Message, tg_id: int, seed: int | None = None):
     row = db.get_profile(tg_id)
     if not row:
-        return await m.answer("Сначала пройдите короткий опрос — /start")
+        return await m.answer("Сначала пройдите короткий опрос — /start",
+                              reply_markup=MAIN_KB)
     import json as _json
     t = _targets_from_row(row)
     pool = filter_recipes(RECIPES, _json.loads(row["exclusions"] or "[]"))
@@ -208,8 +264,8 @@ async def cmd_profile(m: Message):
         f"Цель: {GOAL_RU[row['goal']]}\n\n"
         f"*Норма:* {row['target_kcal']} ккал · Б {row['protein_g']} · "
         f"Ж {row['fat_g']} · У {row['carb_g']}\n\n"
-        f"Изменить параметры — /start\nУдалить данные — /delete",
-        parse_mode=ParseMode.MARKDOWN)
+        f"Изменить параметры — /restart\nУдалить данные — /delete",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_KB)
 
 
 @dp.message(Command("delete"))
@@ -224,8 +280,9 @@ async def cmd_help(m: Message):
         "/plan — план питания на сегодня\n"
         "/replace — собрать другой вариант\n"
         "/profile — ваши параметры и норма\n"
+        "/restart — заполнить параметры заново\n"
         "/delete — удалить все данные\n\n"
-        f"_{DISCLAIMER}_", parse_mode=ParseMode.MARKDOWN)
+        f"_{DISCLAIMER}_", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_KB)
 
 
 async def main():
@@ -239,6 +296,14 @@ async def main():
     token = os.environ["BOT_TOKEN"]
     db.init()
     bot = Bot(token=token)
+    await bot.set_my_commands([
+        BotCommand(command="plan", description="План питания на сегодня"),
+        BotCommand(command="replace", description="Собрать другой вариант"),
+        BotCommand(command="profile", description="Параметры и норма"),
+        BotCommand(command="restart", description="Заполнить параметры заново"),
+        BotCommand(command="delete", description="Удалить все данные"),
+        BotCommand(command="help", description="Что умеет бот"),
+    ])
     await dp.start_polling(bot)
 
 
