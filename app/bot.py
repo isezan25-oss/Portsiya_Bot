@@ -114,8 +114,17 @@ class Onboarding(StatesGroup):
     weight = State()
     activity = State()
     goal = State()
+    meals = State()
     allergens = State()
     prefers = State()
+
+
+# Сколько слотов в дне. Разбивка долей — в core.MEAL_SPLIT, туда не лезем.
+MEALS_OPTIONS = [
+    ("3 раза в день, без перекусов", 3),
+    ("3 раза + перекус", 4),
+    ("3 раза + два перекуса", 5),
+]
 
 
 def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
@@ -243,7 +252,20 @@ PREFERENCE_LABELS = [label for label, _ in PREFERENCES]
 
 @dp.callback_query(Onboarding.goal, F.data.startswith("goal:"))
 async def on_goal(c: CallbackQuery, state: FSMContext):
-    await state.update_data(goal=c.data.split(":")[1], allergens=[])
+    await state.update_data(goal=c.data.split(":")[1])
+    await state.set_state(Onboarding.meals)
+    await c.message.edit_text(
+        "Сколько раз в день вам удобно есть?\n\n"
+        "_Чем выше ваша норма, тем важнее разбить её на большее число приёмов: "
+        "иначе на один приём приходится порция, которую тяжело съесть._",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([[(label, f"meals:{n}")] for label, n in MEALS_OPTIONS]))
+    await c.answer()
+
+
+@dp.callback_query(Onboarding.meals, F.data.startswith("meals:"))
+async def on_meals(c: CallbackQuery, state: FSMContext):
+    await state.update_data(meals=int(c.data.split(":")[1]), allergens=[])
     await state.set_state(Onboarding.allergens)
     await c.message.edit_text(
         "Есть ли у вас аллергия или непереносимость? Отметьте всё, что нельзя "
@@ -294,7 +316,8 @@ async def on_prefers(c: CallbackQuery, state: FSMContext):
 
 async def _finish_onboarding(c: CallbackQuery, d: dict):
     p = Profile(sex=d["sex"], age=d["age"], height_cm=d["height"],
-                weight_kg=d["weight"], activity=d["activity"], goal=d["goal"])
+                weight_kg=d["weight"], activity=d["activity"], goal=d["goal"],
+                meals_per_day=d.get("meals", 4))
     try:
         t = calculate(p)
     except NotEligible as e:
@@ -311,11 +334,15 @@ async def _finish_onboarding(c: CallbackQuery, d: dict):
     # Сочетание аллергенов может вырезать слишком много: «молоко + глютен»
     # оставляет 24 блюда из 83, и план не собирается. Честнее сказать сразу,
     # чем показывать отказ на каждый запрос плана.
-    if terms and not relax_and_build(t, filter_recipes(RECIPES, terms), ADDONS,
-                                     meals=4, seed=1)[0]:
-        notes += ("\n\n_С таким набором ограничений в базе пока слишком мало "
-                  "блюд, чтобы собрать день под вашу норму. Я буду пробовать, "
-                  "но план может не получаться — база пополняется._")
+    if not relax_and_build(t, filter_recipes(RECIPES, terms), ADDONS,
+                           meals=p.meals_per_day, seed=1)[0]:
+        hint = ("С такими ограничениями" if terms else "Под такую норму")
+        more_meals = ("\nПопробуйте выбрать больше приёмов пищи — /restart: "
+                      "на высокой норме день из трёх приёмов часто не собирается."
+                      if p.meals_per_day < 5 else "")
+        notes += (f"\n\n_{hint} в базе пока мало блюд, чтобы собрать день. "
+                  f"Я буду пробовать, но план может не получаться — база "
+                  f"пополняется.{more_meals}_")
     await c.message.edit_text(
         f"Готово. Ваша норма:\n\n"
         f"*{t.kcal} ккал* в день\n"
