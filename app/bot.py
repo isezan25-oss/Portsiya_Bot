@@ -73,6 +73,11 @@ TRAINING_HINT = (
 )
 
 
+# Сколько раз в сутки можно собрать новый план. Просмотр уже собранного
+# не считается. Счётчик переживает /delete — иначе лимит обходится
+# удалением профиля и повторным /start.
+DAILY_PLAN_LIMIT = 3
+
 BTN_PLAN = "🍽 План на сегодня"
 BTN_PROFILE = "👤 Мой профиль"
 BTN_HELP = "❓ Помощь"
@@ -365,11 +370,27 @@ def _targets_from_row(row: dict):
                    water_ml=round(row["weight_kg"] * 30), notes=[])
 
 
-async def _send_plan(m: Message, tg_id: int, seed: int | None = None):
+PLAN_BUTTONS = kb([[("Другой вариант", "replan")], [("📖 Прислать рецепты", "recipes")]])
+
+
+async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
+                     regenerate: bool = False):
     row = db.get_profile(tg_id)
     if not row:
         return await m.answer("Сначала пройдите короткий опрос — /start",
                               reply_markup=MAIN_KB)
+
+    today = date.today()
+    saved = db.get_plan(tg_id, today)
+    if saved and not regenerate:
+        # Уже собранный план показываем как есть: просмотр попытку не тратит.
+        return await m.answer(saved["text"], parse_mode=ParseMode.MARKDOWN,
+                              reply_markup=PLAN_BUTTONS)
+    if db.plans_today(tg_id, today) >= DAILY_PLAN_LIMIT:
+        return await m.answer(
+            f"На сегодня лимит: {DAILY_PLAN_LIMIT} подбора в день. "
+            f"Завтра соберу новый план.\n\n"
+            f"Показать сегодняшний — «{BTN_PLAN}».", reply_markup=MAIN_KB)
     import json as _json
     t = _targets_from_row(row)
     pool = filter_recipes(RECIPES, _json.loads(row["exclusions"] or "[]"))
@@ -383,9 +404,13 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None):
     text = format_plan(plan, t)
     if notes:
         text += "\n\n" + "\n".join(f"_{n}_" for n in notes)
-    db.save_plan(tg_id, date.today(), [i.recipe.id for i in plan.items], text)
-    await m.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb(
-        [[("Другой вариант", "replan")], [("📖 Прислать рецепты", "recipes")]]))
+    db.save_plan(tg_id, today, [i.recipe.id for i in plan.items], text)
+    used = db.count_plan(tg_id, today)
+    left = DAILY_PLAN_LIMIT - used
+    if left <= 1:
+        text += (f"\n\n_Это последний подбор на сегодня._" if left == 1
+                 else "")
+    await m.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=PLAN_BUTTONS)
 
 
 @dp.message(Command("plan"))
@@ -401,7 +426,8 @@ async def cb_replan(c: CallbackQuery):
         return await c.answer(
             "Рецепты на сегодня уже выданы — менять план можно до этого. "
             "Новый план будет завтра.", show_alert=True)
-    await _send_plan(c.message, c.from_user.id, seed=random.randint(1, 10 ** 6))
+    await _send_plan(c.message, c.from_user.id, seed=random.randint(1, 10 ** 6),
+                     regenerate=True)
     await c.answer()
 
 
@@ -433,7 +459,8 @@ async def cb_recipes(c: CallbackQuery):
 
 @dp.message(Command("replace"))
 async def cmd_replace(m: Message):
-    await _send_plan(m, m.from_user.id, seed=int(date.today().strftime("%j")) + 7)
+    await _send_plan(m, m.from_user.id, seed=int(date.today().strftime("%j")) + 7,
+                     regenerate=True)
 
 
 @dp.message(Command("profile"))
@@ -456,7 +483,8 @@ async def cmd_profile(m: Message):
 @dp.message(Command("delete"))
 async def cmd_delete(m: Message):
     db.delete_user(m.from_user.id)
-    await m.answer("Все ваши данные удалены. Начать заново — /start")
+    await m.answer("Профиль и планы удалены. Начать заново — /start.\n"
+                   "Счётчик подборов за сегодня сохраняется — он не содержит ваших данных.")
 
 
 @dp.message(Command("help"))

@@ -42,6 +42,16 @@ CREATE TABLE IF NOT EXISTS profiles (
     calculated_at TEXT
 );
 
+-- Счётчик подборов за сутки. Намеренно без ссылки на users: при /delete строка
+-- остаётся, иначе лимит обходится удалением профиля и повторным /start.
+-- Профиля тут нет, только идентификатор, дата и число.
+CREATE TABLE IF NOT EXISTS daily_usage (
+    telegram_id INTEGER NOT NULL,
+    usage_date  TEXT NOT NULL,
+    plans       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (telegram_id, usage_date)
+);
+
 CREATE TABLE IF NOT EXISTS plans (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
@@ -127,6 +137,26 @@ def get_plan(tg_id: int, plan_date: date) -> dict | None:
         row = c.execute("SELECT payload FROM plans WHERE telegram_id=? AND plan_date=?",
                         (tg_id, plan_date.isoformat())).fetchone()
     return json.loads(row["payload"]) if row else None
+
+
+def plans_today(tg_id: int, day: date) -> int:
+    with connect() as c:
+        row = c.execute("SELECT plans FROM daily_usage WHERE telegram_id=? AND usage_date=?",
+                        (tg_id, day.isoformat())).fetchone()
+    return row["plans"] if row else 0
+
+
+def count_plan(tg_id: int, day: date) -> int:
+    """Отмечает один собранный план и возвращает, сколько их стало за сутки."""
+    with connect() as c:
+        c.execute("""INSERT INTO daily_usage (telegram_id, usage_date, plans)
+                     VALUES (?,?,1)
+                     ON CONFLICT(telegram_id, usage_date)
+                     DO UPDATE SET plans = plans + 1""",
+                  (tg_id, day.isoformat()))
+        row = c.execute("SELECT plans FROM daily_usage WHERE telegram_id=? AND usage_date=?",
+                        (tg_id, day.isoformat())).fetchone()
+    return row["plans"]
 
 
 def accept_plan(tg_id: int, plan_date: date) -> None:
