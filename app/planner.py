@@ -321,7 +321,7 @@ def format_plan(plan: Plan, targets: Targets) -> str:
             portion = f", порция ×{item.scale:.2f}"
         lines.append(f"*{MEAL_RU[item.meal]}*\n{r.title}{portion} — {round(item.kcal)} ккал")
     if plan.addon:
-        lines.append(f"*К этому*\n{plan.addon.title} — {round(plan.addon.kcal)} ккал")
+        lines.append(f"*Добавка*\n{plan.addon.title} — {round(plan.addon.kcal)} ккал")
     total = (f"\n*Итого за день*\n{round(plan.kcal)} ккал  ·  Б {round(plan.protein)} г  ·  "
              f"Ж {round(plan.fat)} г  ·  У {round(plan.carb)} г\n"
              f"_Ваша норма: {targets.kcal} ккал, белок {targets.protein_g} г_")
