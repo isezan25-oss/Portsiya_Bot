@@ -144,13 +144,18 @@ dp = Dispatcher(storage=MemoryStorage())
 
 async def _ask_sex(m: Message, state: FSMContext):
     await state.set_state(Onboarding.sex)
+    # Приветствие отдельным сообщением — только ради постоянной клавиатуры:
+    # к одному сообщению нельзя прицепить и её, и кнопки под вопросом, а если
+    # опрос оборвётся, человек останется совсем без кнопок.
     await m.answer(
         "Привет! Я соберу для вас план питания под ваши параметры — "
         "с конкретными блюдами и граммовкой, а не просто цифрой калорий.\n\n"
-        "Шесть вопросов, меньше минуты.\n\n"
+        "Несколько вопросов, меньше минуты.\n\n"
         f"_{SOURCES}_\n\n"
-        f"_{DISCLAIMER}_\n\nВаш пол?",
-        parse_mode=ParseMode.MARKDOWN,
+        f"_{DISCLAIMER}_",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_KB)
+    await m.answer(
+        "Ваш пол?",
         reply_markup=kb([[("Женский", "sex:female"), ("Мужской", "sex:male")]]),
     )
 
@@ -169,6 +174,12 @@ async def cmd_start(m: Message, state: FSMContext):
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=MAIN_KB)
     await _ask_sex(m, state)
+
+
+@dp.message(Command("menu"))
+async def cmd_menu(m: Message):
+    """Вернуть клавиатуру: её можно свернуть, и тогда кнопок не видно."""
+    await m.answer("Кнопки на месте.", reply_markup=MAIN_KB)
 
 
 @dp.message(Command("restart"))
@@ -507,6 +518,7 @@ async def cmd_help(m: Message):
         "/replace — собрать другой вариант\n"
         "/profile — ваши параметры и норма\n"
         "/restart — заполнить параметры заново\n"
+        "/menu — вернуть кнопки, если пропали\n"
         "/delete — удалить все данные\n\n"
         f"_{SOURCES}_\n\n"
         f"_{DISCLAIMER}_", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_KB)
@@ -562,6 +574,7 @@ async def main():
         BotCommand(command="replace", description="Собрать другой вариант"),
         BotCommand(command="profile", description="Параметры и норма"),
         BotCommand(command="restart", description="Заполнить параметры заново"),
+        BotCommand(command="menu", description="Вернуть кнопки"),
         BotCommand(command="delete", description="Удалить все данные"),
         BotCommand(command="help", description="Что умеет бот"),
     ])
