@@ -106,6 +106,12 @@ def set_exclusions(tg_id: int, items: list[str]) -> None:
                   (json.dumps(items, ensure_ascii=False), tg_id))
 
 
+def set_prefer_tags(tg_id: int, items: list[str]) -> None:
+    with connect() as c:
+        c.execute("UPDATE profiles SET prefer_tags=? WHERE telegram_id=?",
+                  (json.dumps(items, ensure_ascii=False), tg_id))
+
+
 def save_plan(tg_id: int, plan_date: date, recipe_ids: list[str], text: str) -> None:
     payload = json.dumps({"recipe_ids": recipe_ids, "text": text}, ensure_ascii=False)
     with connect() as c:

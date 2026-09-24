@@ -81,6 +81,29 @@ MAIN_KB = ReplyKeyboardMarkup(
 )
 
 
+# Аллергены: подпись кнопки -> что искать в рецептах. Списком, потому что в
+# базе одно и то же встречается в разных формах (яйцо/яйца) и в разных полях
+# (аллерген «молоко», тег «молочное»). filter_recipes ищет подстроку, поэтому
+# склонять за человека нельзя — проще перечислить формы здесь.
+ALLERGENS = [
+    ("Молочное", ["молоко", "молочное"]),
+    ("Глютен", ["глютен"]),
+    ("Орехи", ["орех"]),
+    ("Арахис", ["арахис"]),
+    ("Яйца", ["яйцо", "яйца"]),
+    ("Рыба", ["рыба"]),
+    ("Соя", ["соя"]),
+    ("Кунжут", ["кунжут"]),
+]
+PREFERENCES = [
+    ("Десерты", "десерт"),
+    ("Рыба", "рыба"),
+    ("Курица", "курица"),
+    ("Быстрые блюда", "быстро"),
+    ("Вегетарианское", "вегетарианское"),
+]
+
+
 class Onboarding(StatesGroup):
     sex = State()
     age = State()
@@ -88,6 +111,8 @@ class Onboarding(StatesGroup):
     weight = State()
     activity = State()
     goal = State()
+    allergens = State()
+    prefers = State()
 
 
 def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
@@ -202,13 +227,71 @@ async def on_activity(c: CallbackQuery, state: FSMContext):
     await c.answer()
 
 
+def _pick_kb(options: list[str], chosen: set[str], prefix: str,
+             done_label: str) -> InlineKeyboardMarkup:
+    rows = [[(("✓ " if o in chosen else "") + o, f"{prefix}:{o}")] for o in options]
+    rows.append([(done_label, f"{prefix}:__done__")])
+    return kb(rows)
+
+
+ALLERGEN_LABELS = [label for label, _ in ALLERGENS]
+PREFERENCE_LABELS = [label for label, _ in PREFERENCES]
+
+
 @dp.callback_query(Onboarding.goal, F.data.startswith("goal:"))
 async def on_goal(c: CallbackQuery, state: FSMContext):
+    await state.update_data(goal=c.data.split(":")[1], allergens=[])
+    await state.set_state(Onboarding.allergens)
+    await c.message.edit_text(
+        "Есть ли у вас аллергия или непереносимость? Отметьте всё, что нельзя "
+        "— такие блюда я в план не поставлю.",
+        reply_markup=_pick_kb(ALLERGEN_LABELS, set(), "alg", "Готово / нет аллергий"))
+    await c.answer()
+
+
+@dp.callback_query(Onboarding.allergens, F.data.startswith("alg:"))
+async def on_allergens(c: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    chosen = set(d.get("allergens", []))
+    value = c.data.split(":", 1)[1]
+    if value != "__done__":
+        chosen.symmetric_difference_update({value})
+        await state.update_data(allergens=sorted(chosen))
+        await c.message.edit_reply_markup(
+            reply_markup=_pick_kb(ALLERGEN_LABELS, chosen, "alg",
+                                  "Готово / нет аллергий"))
+        return await c.answer()
+
+    await state.update_data(prefers=[])
+    await state.set_state(Onboarding.prefers)
+    await c.message.edit_text(
+        "Что любите? Отмеченное буду ставить в план чаще — но не всегда: "
+        "норма важнее.",
+        reply_markup=_pick_kb(PREFERENCE_LABELS, set(), "prf", "Готово / пропустить"))
+    await c.answer()
+
+
+@dp.callback_query(Onboarding.prefers, F.data.startswith("prf:"))
+async def on_prefers(c: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    chosen = set(d.get("prefers", []))
+    value = c.data.split(":", 1)[1]
+    if value != "__done__":
+        chosen.symmetric_difference_update({value})
+        await state.update_data(prefers=sorted(chosen))
+        await c.message.edit_reply_markup(
+            reply_markup=_pick_kb(PREFERENCE_LABELS, chosen, "prf",
+                                  "Готово / пропустить"))
+        return await c.answer()
+
     d = await state.get_data()
     await state.clear()
+    await _finish_onboarding(c, d)
+
+
+async def _finish_onboarding(c: CallbackQuery, d: dict):
     p = Profile(sex=d["sex"], age=d["age"], height_cm=d["height"],
-                weight_kg=d["weight"], activity=d["activity"],
-                goal=c.data.split(":")[1])
+                weight_kg=d["weight"], activity=d["activity"], goal=d["goal"])
     try:
         t = calculate(p)
     except NotEligible as e:
@@ -216,7 +299,20 @@ async def on_goal(c: CallbackQuery, state: FSMContext):
         return await c.answer()
 
     db.save_profile(c.from_user.id, p, t)
+    terms = [term for label, terms in ALLERGENS if label in d.get("allergens", [])
+             for term in terms]
+    db.set_exclusions(c.from_user.id, terms)
+    db.set_prefer_tags(c.from_user.id, [tag for label, tag in PREFERENCES
+                                        if label in d.get("prefers", [])])
     notes = ("\n\n" + "\n".join(f"_{n}_" for n in t.notes)) if t.notes else ""
+    # Сочетание аллергенов может вырезать слишком много: «молоко + глютен»
+    # оставляет 24 блюда из 83, и план не собирается. Честнее сказать сразу,
+    # чем показывать отказ на каждый запрос плана.
+    if terms and not relax_and_build(t, filter_recipes(RECIPES, terms), ADDONS,
+                                     meals=4, seed=1)[0]:
+        notes += ("\n\n_С таким набором ограничений в базе пока слишком мало "
+                  "блюд, чтобы собрать день под вашу норму. Я буду пробовать, "
+                  "но план может не получаться — база пополняется._")
     await c.message.edit_text(
         f"Готово. Ваша норма:\n\n"
         f"*{t.kcal} ккал* в день\n"
