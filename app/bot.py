@@ -177,19 +177,19 @@ async def cmd_restart(m: Message, state: FSMContext):
     await _ask_sex(m, state)
 
 
-@dp.message(F.text == BTN_PLAN)
+@dp.message(lambda m: bool(m.text) and "план на сегодня" in m.text.lower())
 async def btn_plan(m: Message, state: FSMContext):
     await state.clear()
     await _send_plan(m, m.from_user.id)
 
 
-@dp.message(F.text == BTN_PROFILE)
+@dp.message(lambda m: bool(m.text) and "мой профиль" in m.text.lower())
 async def btn_profile(m: Message, state: FSMContext):
     await state.clear()
     await cmd_profile(m)
 
 
-@dp.message(F.text == BTN_HELP)
+@dp.message(lambda m: bool(m.text) and m.text.lower().strip("❓ ") == "помощь")
 async def btn_help(m: Message, state: FSMContext):
     await state.clear()
     await cmd_help(m)
@@ -390,8 +390,10 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
                      regenerate: bool = False):
     row = db.get_profile(tg_id)
     if not row:
-        return await m.answer("Сначала пройдите короткий опрос — /start",
-                              reply_markup=MAIN_KB)
+        return await m.answer(
+            "Не нахожу ваш профиль. Если вы его уже заполняли, значит данные "
+            "не сохранились при обновлении бота — извините. Пройдите /start, "
+            "это минута.", reply_markup=MAIN_KB)
 
     today = date.today()
     saved = db.get_plan(tg_id, today)
@@ -450,6 +452,9 @@ async def cb_recipes(c: CallbackQuery):
     if not saved:
         return await c.answer("Сначала соберите план.", show_alert=True)
 
+    # Отвечаем сразу: рецепты идут с паузами, а кнопка ждать не умеет —
+    # Telegram гасит её по таймауту, и человек видит зависшую кнопку.
+    await c.answer("Собираю рецепты…")
     db.accept_plan(c.from_user.id, date.today())
     titles = {r.id: r.title for r in RECIPES}
     # продукты вроде «Яблоко, 1 шт.» карточки не имеют — готовить нечего
@@ -463,7 +468,6 @@ async def cb_recipes(c: CallbackQuery):
         f"Это все рецепты на сегодня ({sent}).{tail}\n\n"
         f"План на сегодня зафиксирован — заменить блюда уже нельзя. "
         f"Новый план соберётся завтра.")
-    await c.answer()
 
 
 @dp.message(Command("replace"))
@@ -508,6 +512,36 @@ async def cmd_help(m: Message):
         f"_{DISCLAIMER}_", parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_KB)
 
 
+# --- запасные обработчики. Регистрируются последними, поэтому срабатывают
+# только если ничего выше не подошло. ---
+
+ONBOARDING_PREFIXES = {"sex", "act", "goal", "meals", "alg", "prf"}
+
+
+@dp.callback_query(lambda c: bool(c.data) and c.data.split(":")[0] in ONBOARDING_PREFIXES)
+async def cb_stale_onboarding(c: CallbackQuery, state: FSMContext):
+    """Кнопка опроса без состояния. Состояние живёт в памяти процесса, поэтому
+    после перезапуска бота оно теряется, и кнопка молча переставала работать."""
+    await state.clear()
+    await c.answer("Опрос прервался — бот обновился. Начните заново: /start",
+                   show_alert=True)
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+@dp.message()
+async def fallback(m: Message):
+    """Что угодно, чего бот не понял. Раньше он просто молчал."""
+    if db.get_profile(m.from_user.id):
+        await m.answer(
+            f"Не понял. Нажмите «{BTN_PLAN}» или выберите команду в меню — "
+            f"список есть в /help.", reply_markup=MAIN_KB)
+    else:
+        await m.answer("Чтобы я собрал план, пройдите короткий опрос — /start")
+
+
 async def main():
     # Локально токен лежит в .env; на Railway он приходит из Variables,
     # и python-dotenv там не нужен — отсюда мягкий импорт.
@@ -518,6 +552,10 @@ async def main():
         pass
     token = os.environ["BOT_TOKEN"]
     db.init()
+    volume = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    logging.info("База данных: %s", db.DB_PATH)
+    logging.info("Том Railway: %s", volume or "НЕ ПОДКЛЮЧЁН — профили сотрутся "
+                                             "при следующем обновлении")
     bot = Bot(token=token)
     await bot.set_my_commands([
         BotCommand(command="plan", description="План питания на сегодня"),
