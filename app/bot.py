@@ -469,10 +469,20 @@ async def cb_recipes(c: CallbackQuery):
     db.accept_plan(c.from_user.id, date.today())
     titles = {r.id: r.title for r in RECIPES}
     # продукты вроде «Яблоко, 1 шт.» карточки не имеют — готовить нечего
-    cards = [recipes.card(rid) for rid in saved["recipe_ids"] if recipes.card(rid)]
+    with_cards = [rid for rid in saved["recipe_ids"] if recipes.card(rid)]
+    cards = [recipes.card(rid) for rid in with_cards]
     sent = len(cards)
-    for part in recipes.pack(cards):
-        await _send_throttled(c.message, part)
+
+    # Трассировка: если сборник всплывёт где-то ещё, видно, чей это экземпляр.
+    who = f"@{c.from_user.username}" if c.from_user.username else f"id {c.from_user.id}"
+    footer = (f"\n\n— — —\nРецепт из авторского сборника проекта «Порция». "
+              f"Экземпляр подготовлен для {who}. Личное использование; "
+              f"публикация и перепродажа не разрешены.")
+    for part in recipes.pack(cards, limit=recipes.TELEGRAM_LIMIT - len(footer) - 8):
+        await _send_throttled(c.message, part + footer)
+
+    collected = db.log_recipes(c.from_user.id, with_cards)
+    logging.info("рецепты выданы: user=%s разных_всего=%s", c.from_user.id, collected)
     simple = [titles.get(r, r) for r in saved["recipe_ids"] if not recipes.card(r)]
     tail = ("\n\nБез рецепта: " + ", ".join(simple) + " — готовить нечего.") if simple else ""
     await c.message.answer(
@@ -508,7 +518,28 @@ async def cmd_profile(m: Message):
 async def cmd_delete(m: Message):
     db.delete_user(m.from_user.id)
     await m.answer("Профиль и планы удалены. Начать заново — /start.\n"
-                   "Счётчик подборов за сегодня сохраняется — он не содержит ваших данных.")
+                   "Счётчик подборов и журнал выданных рецептов остаются: в них\n"
+                   "нет ваших параметров, только числа.")
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(m: Message):
+    """Кто сколько собрал. Видна только владельцу — ADMIN_ID в окружении."""
+    admin = os.environ.get("ADMIN_ID")
+    if not admin or str(m.from_user.id) != admin:
+        return
+    total = len([r for r in RECIPES if r.kind != "product"])
+    rows = db.collectors()
+    if not rows:
+        return await m.answer("Рецепты пока никому не выдавались.")
+    lines = [f"Собрано рецептов из {total}:"]
+    for r in rows:
+        share = r["unique_recipes"] / total
+        flag = " (!)" if share >= 0.5 else ""
+        lines.append(f"{r['telegram_id']}: {r['unique_recipes']} "
+                     f"({share:.0%}), выдач {r['deliveries']}, "
+                     f"с {r['started'][:10]}{flag}")
+    await m.answer("\n".join(lines))
 
 
 @dp.message(Command("help"))

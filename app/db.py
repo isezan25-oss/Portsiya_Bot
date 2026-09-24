@@ -52,6 +52,17 @@ CREATE TABLE IF NOT EXISTS daily_usage (
     PRIMARY KEY (telegram_id, usage_date)
 );
 
+-- Кому какие рецепты уже выданы. Нужен, чтобы видеть, кто собирает базу:
+-- обычный пользователь упирается в 70% за месяцы, сборщик доходит быстрее.
+-- Тоже без ссылки на users — иначе /delete обнуляет картину.
+CREATE TABLE IF NOT EXISTS recipe_log (
+    telegram_id INTEGER NOT NULL,
+    recipe_id   TEXT NOT NULL,
+    first_sent  TEXT DEFAULT CURRENT_TIMESTAMP,
+    times       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (telegram_id, recipe_id)
+);
+
 CREATE TABLE IF NOT EXISTS plans (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
@@ -157,6 +168,31 @@ def count_plan(tg_id: int, day: date) -> int:
         row = c.execute("SELECT plans FROM daily_usage WHERE telegram_id=? AND usage_date=?",
                         (tg_id, day.isoformat())).fetchone()
     return row["plans"]
+
+
+def log_recipes(tg_id: int, recipe_ids: list[str]) -> int:
+    """Отмечает выданные рецепты, возвращает, сколько разных получил человек."""
+    with connect() as c:
+        c.executemany("""INSERT INTO recipe_log (telegram_id, recipe_id) VALUES (?,?)
+                         ON CONFLICT(telegram_id, recipe_id)
+                         DO UPDATE SET times = times + 1""",
+                      [(tg_id, rid) for rid in recipe_ids])
+        row = c.execute("SELECT COUNT(*) AS n FROM recipe_log WHERE telegram_id=?",
+                        (tg_id,)).fetchone()
+    return row["n"]
+
+
+def collectors(limit: int = 15) -> list[dict]:
+    """Кто сколько разных рецептов собрал, сверху — самые активные."""
+    with connect() as c:
+        rows = c.execute("""
+            SELECT telegram_id,
+                   COUNT(*) AS unique_recipes,
+                   SUM(times) AS deliveries,
+                   MIN(first_sent) AS started
+            FROM recipe_log GROUP BY telegram_id
+            ORDER BY unique_recipes DESC LIMIT ?""", (limit,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 def accept_plan(tg_id: int, plan_date: date) -> None:
