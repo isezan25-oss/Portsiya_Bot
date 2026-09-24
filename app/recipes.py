@@ -48,6 +48,23 @@ def card(recipe_id: str) -> str | None:
     return CARDS.get(recipe_id)
 
 
+def pack(cards: list[str], limit: int = TELEGRAM_LIMIT) -> list[str]:
+    """Складывает карточки в наименьшее число сообщений: Telegram пропускает
+    около одного сообщения в секунду на чат, и восемь подряд ловят 429."""
+    out: list[str] = []
+    current = ""
+    for card_text in cards:
+        for part in chunks(card_text, limit):
+            if current and len(current) + len(part) + 4 > limit:
+                out.append(current)
+                current = part
+            else:
+                current = f"{current}\n\n\n{part}" if current else part
+    if current:
+        out.append(current)
+    return out
+
+
 def chunks(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
     """Режет длинную карточку по абзацам, чтобы влезть в сообщение Telegram."""
     if len(text) <= limit:

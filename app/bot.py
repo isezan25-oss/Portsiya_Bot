@@ -11,6 +11,7 @@ from datetime import date
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -373,6 +374,18 @@ def _targets_from_row(row: dict):
 PLAN_BUTTONS = kb([[("Другой вариант", "replan")], [("📖 Прислать рецепты", "recipes")]])
 
 
+async def _send_throttled(m: Message, text: str, pause: float = 1.0) -> None:
+    """Telegram пропускает примерно одно сообщение в секунду на чат и отвечает
+    429 с retry_after, если частить. Рецепты идут пачкой, поэтому ждём."""
+    while True:
+        try:
+            await m.answer(text)
+            break
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+    await asyncio.sleep(pause)
+
+
 async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
                      regenerate: bool = False):
     row = db.get_profile(tg_id)
@@ -439,15 +452,11 @@ async def cb_recipes(c: CallbackQuery):
 
     db.accept_plan(c.from_user.id, date.today())
     titles = {r.id: r.title for r in RECIPES}
-    sent = 0
-    for rid in saved["recipe_ids"]:
-        text = recipes.card(rid)
-        if not text:
-            # продукты вроде «Яблоко, 1 шт.» — готовить нечего
-            continue
-        for part in recipes.chunks(text):
-            await c.message.answer(part)
-        sent += 1
+    # продукты вроде «Яблоко, 1 шт.» карточки не имеют — готовить нечего
+    cards = [recipes.card(rid) for rid in saved["recipe_ids"] if recipes.card(rid)]
+    sent = len(cards)
+    for part in recipes.pack(cards):
+        await _send_throttled(c.message, part)
     simple = [titles.get(r, r) for r in saved["recipe_ids"] if not recipes.card(r)]
     tail = ("\n\nБез рецепта: " + ", ".join(simple) + " — готовить нечего.") if simple else ""
     await c.message.answer(
