@@ -11,7 +11,7 @@ from datetime import date
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -20,7 +20,7 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, KeyboardButton, Message,
                            ReplyKeyboardMarkup)
 
-from . import db, family, recipes
+from . import broadcast, db, family, recipes
 from .core import ACTIVITY, NotEligible, Profile, activity_factor, calculate
 from .planner import (format_plan, load_addons, load_recipes,
                       filter_recipes, relax_and_build)
@@ -847,11 +847,17 @@ async def cmd_delete(m: Message):
                    "нет ваших параметров, только числа.")
 
 
+def _is_admin(tg_id: int) -> bool:
+    """Владелец бота — ADMIN_ID в окружении. Если переменной нет, владельца нет
+    ни у одной команды: лучше не работает ни у кого, чем работает у всех."""
+    admin = os.environ.get("ADMIN_ID")
+    return bool(admin) and str(tg_id) == admin
+
+
 @dp.message(Command("stats"))
 async def cmd_stats(m: Message):
     """Кто сколько собрал. Видна только владельцу — ADMIN_ID в окружении."""
-    admin = os.environ.get("ADMIN_ID")
-    if not admin or str(m.from_user.id) != admin:
+    if not _is_admin(m.from_user.id):
         return
     total = len([r for r in RECIPES if r.kind != "product"])
     rows = db.collectors()
@@ -865,6 +871,106 @@ async def cmd_stats(m: Message):
                      f"({share:.0%}), выдач {r['deliveries']}, "
                      f"с {r['started'][:10]}{flag}")
     await m.answer("\n".join(lines))
+
+
+# --- рассылка объявлений. Только владельцу. ---
+
+ANNOUNCE_HELP = (
+    "Рассылка объявления.\n\n"
+    "Отправьте одним сообщением:\n"
+    "`/announce` и с новой строки текст.\n\n"
+    "Бот сначала покажет, как объявление увидят люди, и спросит подтверждение. "
+    "Разметка — как в боте: `*жирный*`, `_курсив_`.")
+
+
+def _announce_kb(bid: int, resume: bool = False) -> InlineKeyboardMarkup:
+    label = "Дослать остаток" if resume else "Отправить всем"
+    return kb([[(label, f"ann:{bid}")], [("Отмена", f"anndrop:{bid}")]])
+
+
+@dp.message(Command("announce"))
+async def cmd_announce(m: Message, state: FSMContext):
+    if not _is_admin(m.from_user.id):
+        return
+    await state.clear()
+    parts = (m.text or "").split(maxsplit=1)
+    text = parts[1].strip() if len(parts) > 1 else ""
+
+    if not text:
+        return await _announce_status(m)
+
+    # Показ объявления — он же проверка разметки. Легаси-Markdown ломается на
+    # одиночных _ * [ ] `, и если текст неверный, Телеграм откажет здесь, на
+    # владельце, а не на середине рассылки.
+    try:
+        await m.answer(text, parse_mode=ParseMode.MARKDOWN)
+    except TelegramBadRequest as e:
+        return await m.answer(
+            "Так отправить не получится: Телеграм не принял разметку.\n"
+            f"`{e.message}`\n\n"
+            "Обычно виноват одиночный символ _ * ` [ ] в тексте. Уберите его "
+            "или продублируйте.", parse_mode=ParseMode.MARKDOWN)
+
+    bid = db.new_broadcast(text)
+    await m.answer(f"Так увидят объявление {db.audience()} чел. Отправляем?",
+                   reply_markup=_announce_kb(bid))
+
+
+async def _announce_status(m: Message) -> None:
+    """Что было в прошлый раз и осталось ли кому досылать."""
+    last = db.last_broadcast()
+    if not last:
+        return await m.answer(ANNOUNCE_HELP, parse_mode=ParseMode.MARKDOWN)
+    stats = db.broadcast_stats(last["id"])
+    left = db.broadcast_targets(last["id"])
+    lines = [f"Последнее объявление от {last['created_at'][:16]}:",
+             f"доставлено {stats.get('sent', 0)}, "
+             f"заблокировали бота {stats.get('blocked', 0)}, "
+             f"ошибок {stats.get('failed', 0)}"]
+    if not last["sent_at"] and not stats:
+        lines.append("Оно так и не было отправлено.")
+    if left:
+        lines.append(f"\nНе дошло до {len(left)} чел. — можно дослать.")
+    lines.append("\n" + ANNOUNCE_HELP)
+    await m.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN,
+                   reply_markup=_announce_kb(last["id"], resume=True) if left else None)
+
+
+@dp.callback_query(F.data.startswith("anndrop:"))
+async def cb_announce_drop(c: CallbackQuery):
+    if not _is_admin(c.from_user.id):
+        return await c.answer()
+    db.drop_broadcast(int(c.data.split(":")[1]))
+    await c.message.edit_text("Не отправлено, объявление удалено.")
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("ann:"))
+async def cb_announce_send(c: CallbackQuery):
+    if not _is_admin(c.from_user.id):
+        return await c.answer()
+    # Отвечаем на нажатие сразу: рассылка идёт минуты, а кнопка без ответа
+    # висит в «часиках», и владелец решает, что бот умер.
+    await c.answer()
+    bid = int(c.data.split(":")[1])
+    row = db.get_broadcast(bid)
+    if not row:
+        return await c.message.edit_text("Объявление уже удалено.")
+    targets = db.broadcast_targets(bid)
+    if not targets:
+        return await c.message.edit_text("Досылать некому — дошло до всех.")
+    await c.message.edit_text(f"Рассылаю {len(targets)} чел. Это займёт "
+                             f"около {max(1, round(len(targets) * broadcast.PAUSE / 60))} мин.")
+
+    async def send(tg_id: int, text: str) -> None:
+        await c.bot.send_message(tg_id, text, parse_mode=ParseMode.MARKDOWN,
+                                 disable_web_page_preview=True)
+
+    rep = await broadcast.deliver(
+        send, lambda tg, st, d: db.mark_delivery(bid, tg, st, d),
+        targets, row["text"])
+    db.mark_broadcast_sent(bid)
+    await c.message.answer(f"Готово: {rep.line()}.")
 
 
 @dp.message(Command("help"))
@@ -947,14 +1053,15 @@ async def main():
         from aiogram.types import BotCommandScopeChat
         await bot.set_my_commands(
             [BotCommand(command="stats", description="Кто сколько рецептов собрал"),
+             BotCommand(command="announce", description="Разослать объявление"),
              BotCommand(command="plan", description="План питания на сегодня"),
              BotCommand(command="quick", description="План без сил: до 20 минут"),
              BotCommand(command="profile", description="Параметры и норма"),
              BotCommand(command="help", description="Что умеет бот")],
             scope=BotCommandScopeChat(chat_id=int(admin)))
-        logging.info("ADMIN_ID=%s, /stats доступна", admin)
+        logging.info("ADMIN_ID=%s, /stats и /announce доступны", admin)
     else:
-        logging.warning("ADMIN_ID не задан — /stats не будет отвечать никому. "
+        logging.warning("ADMIN_ID не задан — /stats и /announce не будут отвечать никому. "
                         "Добавьте переменную в Railway, значение узнать у @userinfobot")
     await dp.start_polling(bot)
 

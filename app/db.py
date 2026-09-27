@@ -87,6 +87,24 @@ CREATE TABLE IF NOT EXISTS partners (
     carb_g      INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS broadcasts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    text       TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    sent_at    TEXT
+);
+
+-- Без REFERENCES users: человек может удалить профиль после рассылки, а запись
+-- о доставке должна остаться — в ней нет его параметров, только исход.
+CREATE TABLE IF NOT EXISTS broadcast_delivery (
+    broadcast_id INTEGER NOT NULL REFERENCES broadcasts(id) ON DELETE CASCADE,
+    telegram_id  INTEGER NOT NULL,
+    status       TEXT NOT NULL,
+    detail       TEXT DEFAULT '',
+    at           TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (broadcast_id, telegram_id)
+);
+
 CREATE TABLE IF NOT EXISTS plans (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
@@ -292,6 +310,70 @@ def recent_recipe_ids(tg_id: int, days: int = 5) -> set[str]:
     for r in rows:
         ids.update(json.loads(r["payload"]).get("recipe_ids", []))
     return ids
+
+
+def new_broadcast(text: str) -> int:
+    with connect() as c:
+        cur = c.execute("INSERT INTO broadcasts(text) VALUES (?)", (text,))
+        return cur.lastrowid
+
+
+def drop_broadcast(bid: int) -> None:
+    with connect() as c:
+        c.execute("DELETE FROM broadcasts WHERE id=?", (bid,))
+
+
+def get_broadcast(bid: int) -> dict | None:
+    with connect() as c:
+        row = c.execute("SELECT * FROM broadcasts WHERE id=?", (bid,)).fetchone()
+        return dict(row) if row else None
+
+
+def last_broadcast() -> dict | None:
+    with connect() as c:
+        row = c.execute("SELECT * FROM broadcasts ORDER BY id DESC "
+                        "LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+
+def mark_broadcast_sent(bid: int) -> None:
+    with connect() as c:
+        c.execute("UPDATE broadcasts SET sent_at=CURRENT_TIMESTAMP "
+                  "WHERE id=? AND sent_at IS NULL", (bid,))
+
+
+def broadcast_targets(bid: int) -> list[int]:
+    """Кому ещё не дошло. Ошибки перебираются заново, заблокировавшие бота —
+    нет: их статус не изменится от повторной попытки."""
+    with connect() as c:
+        rows = c.execute(
+            "SELECT u.telegram_id FROM users u "
+            "LEFT JOIN broadcast_delivery d "
+            "  ON d.broadcast_id=? AND d.telegram_id=u.telegram_id "
+            "WHERE d.status IS NULL OR d.status='failed' "
+            "ORDER BY u.telegram_id", (bid,)).fetchall()
+        return [r["telegram_id"] for r in rows]
+
+
+def audience() -> int:
+    with connect() as c:
+        return c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+
+def mark_delivery(bid: int, tg_id: int, status: str, detail: str = "") -> None:
+    with connect() as c:
+        c.execute("INSERT INTO broadcast_delivery"
+                  "(broadcast_id, telegram_id, status, detail) VALUES (?,?,?,?) "
+                  "ON CONFLICT(broadcast_id, telegram_id) DO UPDATE SET "
+                  "status=excluded.status, detail=excluded.detail, "
+                  "at=CURRENT_TIMESTAMP", (bid, tg_id, status, detail))
+
+
+def broadcast_stats(bid: int) -> dict[str, int]:
+    with connect() as c:
+        rows = c.execute("SELECT status, COUNT(*) n FROM broadcast_delivery "
+                         "WHERE broadcast_id=? GROUP BY status", (bid,)).fetchall()
+        return {r["status"]: r["n"] for r in rows}
 
 
 def delete_user(tg_id: int) -> None:
