@@ -111,12 +111,13 @@ MAX_QUICK_MIN = 20
 
 BTN_PLAN = "🍽 План на сегодня"
 BTN_QUICK = "😮‍💨 Нет сил: до 20 минут"
+BTN_SHOP = "🛒 Список продуктов"
 BTN_PROFILE = "👤 Мой профиль"
 BTN_HELP = "❓ Помощь"
 
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_PLAN)],
-              [KeyboardButton(text=BTN_QUICK)],
+              [KeyboardButton(text=BTN_QUICK), KeyboardButton(text=BTN_SHOP)],
               [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
 )
@@ -233,6 +234,12 @@ async def btn_plan(m: Message, state: FSMContext):
 async def btn_quick(m: Message, state: FSMContext):
     await state.clear()
     await _send_plan(m, m.from_user.id, regenerate=True, quick=True)
+
+
+@dp.message(lambda m: bool(m.text) and "список продуктов" in m.text.lower())
+async def btn_shop(m: Message, state: FSMContext):
+    await state.clear()
+    await _send_shopping(m, m.from_user.id)
 
 
 @dp.message(lambda m: bool(m.text) and "мой профиль" in m.text.lower())
@@ -624,19 +631,32 @@ def _shopping_view(items: list[str], checked: set[int]) -> tuple[str, InlineKeyb
     return "\n".join(lines), kb(rows)
 
 
-@dp.callback_query(F.data == "shoplist")
-async def cb_shoplist(c: CallbackQuery):
-    saved = db.get_plan(c.from_user.id, date.today())
+async def _send_shopping(m: Message, tg_id: int) -> None:
+    """Список продуктов по сегодняшнему плану. Подбор не тратит и план не
+    фиксирует: это то же самое, что человек уже видит в рецептах."""
+    saved = db.get_plan(tg_id, date.today())
     if not saved:
-        return await c.answer("Сначала соберите план.", show_alert=True)
-    await c.answer()
+        return await m.answer(
+            f"Списка пока нет — сначала соберите план кнопкой «{BTN_PLAN}».",
+            reply_markup=MAIN_KB)
     scales = saved.get("scales") or [1.0] * len(saved["recipe_ids"])
     items = recipes.shopping_list(list(zip(saved["recipe_ids"], scales)))
     if not items:
-        return await c.message.answer("Для этого плана состав не указан.")
-    db.save_shopping(c.from_user.id, date.today(), items, [])
+        return await m.answer("Для этого плана состав не указан.")
+    db.save_shopping(tg_id, date.today(), items, [])
     text, markup = _shopping_view(items, set())
-    await c.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    await m.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+@dp.callback_query(F.data == "shoplist")
+async def cb_shoplist(c: CallbackQuery):
+    await c.answer()
+    await _send_shopping(c.message, c.from_user.id)
+
+
+@dp.message(Command("shop"))
+async def cmd_shop(m: Message):
+    await _send_shopping(m, m.from_user.id)
 
 
 @dp.callback_query(F.data.startswith("shop:"))
@@ -711,6 +731,8 @@ async def cmd_stats(m: Message):
 async def cmd_help(m: Message):
     await m.answer(
         "/plan — план питания на сегодня\n"
+        "/quick — план из блюд до 20 минут\n"
+        "/shop — список продуктов на день\n"
         "/replace — собрать другой вариант\n"
         "/profile — ваши параметры и норма\n"
         "/restart — заполнить параметры заново\n"
@@ -769,6 +791,7 @@ async def main():
     await bot.set_my_commands([
         BotCommand(command="plan", description="План питания на сегодня"),
         BotCommand(command="quick", description="План без сил: до 20 минут"),
+        BotCommand(command="shop", description="Список продуктов на день"),
         BotCommand(command="replace", description="Собрать другой вариант"),
         BotCommand(command="profile", description="Параметры и норма"),
         BotCommand(command="restart", description="Заполнить параметры заново"),
