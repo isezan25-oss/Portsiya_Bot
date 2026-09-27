@@ -50,6 +50,8 @@ def card(recipe_id: str) -> str | None:
 
 GRAMS_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:–|-)?\s*(\d+(?:[.,]\d+)?)?\s*(г|мл)\b")
 PREFIX_RE = re.compile(r"^Для [^:]{0,40}:\s*")
+# «1 шт.» — это яйцо, а не специя: в список покупок такое попасть обязано
+PIECES_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*шт")
 
 
 def _parse_item(raw: str) -> dict | None:
@@ -59,7 +61,8 @@ def _parse_item(raw: str) -> dict | None:
         return None
     if "—" not in text:
         # специи и «по желанию»: веса нет, но в списке покупок они нужны
-        return {"name": text.rstrip("."), "grams": None, "note": "по вкусу"}
+        return {"name": text.rstrip("."), "grams": None, "pieces": None,
+                "note": "по вкусу"}
     name, _, amount = text.partition("—")
     name = name.strip().rstrip(",").strip()
     amount = amount.strip()
@@ -69,7 +72,12 @@ def _parse_item(raw: str) -> dict | None:
         lo = float(m.group(1).replace(",", "."))
         hi = float(m.group(2).replace(",", ".")) if m.group(2) else lo
         grams = (lo + hi) / 2
-    return {"name": name, "grams": grams, "note": amount}
+    pieces = None
+    if grams is None:
+        p = PIECES_RE.search(amount)
+        if p:
+            pieces = float(p.group(1).replace(",", "."))
+    return {"name": name, "grams": grams, "pieces": pieces, "note": amount}
 
 
 def ingredients(recipe_id: str) -> list[dict]:
@@ -99,19 +107,24 @@ def shopping_list(plan_items: list[tuple[str, float]]) -> list[str]:
     Одинаковые продукты складываются, граммовка умножается на множитель —
     иначе список не совпадёт с тем, что человек реально положит в тарелку."""
     totals: dict[str, float] = {}
+    pieces: dict[str, float] = {}
     loose: dict[str, None] = {}
     for rid, scale in plan_items:
         for item in ingredients(rid):
             key = item["name"][0].upper() + item["name"][1:]
-            if item["grams"] is None:
-                loose.setdefault(key, None)
-            else:
+            if item["grams"] is not None:
                 totals[key] = totals.get(key, 0) + item["grams"] * scale
+            elif item["pieces"] is not None:
+                pieces[key] = pieces.get(key, 0) + item["pieces"] * scale
+            else:
+                loose.setdefault(key, None)
     lines = [f"{name} — {round(g / 5) * 5 if g >= 20 else round(g)} г"
              for name, g in sorted(totals.items())]
     # Специи и «по вкусу» — одной строкой: в списке покупок это обычно то,
     # что уже есть дома, и сорок отдельных пунктов только мешают.
-    spices = sorted(n.lower() for n in loose if n not in totals)
+    lines += [f"{name} — {round(n) if round(n) >= 1 else 1} шт."
+              for name, n in sorted(pieces.items()) if name not in totals]
+    spices = sorted(n.lower() for n in loose if n not in totals and n not in pieces)
     if spices:
         lines.append("Специи и по вкусу: " + ", ".join(spices))
     return lines

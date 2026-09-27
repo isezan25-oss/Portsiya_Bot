@@ -163,12 +163,54 @@ def check_collection(rows: list[dict]) -> None:
         errors.append(f"{rid}: карточка есть, а строки в data/recipes.csv нет")
 
 
+def check_ingredients(rows: list[dict]) -> None:
+    """Состав должен читаться тем же разбором, которым его читает бот:
+    из него собирается список покупок. Проверяем формат, а не содержание."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from app import recipes
+    except Exception as e:  # noqa: BLE001
+        warnings.append(f"разбор состава не проверен: {e}")
+        return
+
+    for r in rows:
+        if r["kind"] == "product":
+            continue
+        rid = r["id"]
+        items = recipes.ingredients(rid)
+        if not items:
+            errors.append(f"{rid}: не читается блок «Ингредиенты» — список "
+                          f"покупок для этого блюда будет пустым. Нужен формат "
+                          f"«- Продукт — 150 г», по строке на продукт")
+            continue
+        weighed = [i for i in items if i["grams"] is not None or i["pieces"] is not None]
+        if len(weighed) < 3:
+            errors.append(f"{rid}: в составе всего {len(weighed)} строк с весом "
+                          f"из {len(items)} — проверьте формат «Продукт — 150 г»")
+        # Строка с числом, но без распознанного количества. Ложки, щепотки и
+        # веточки — это специи, они и должны идти одной строкой; предупреждаем
+        # только о непонятных единицах вроде «1 стакан» или «2 банки».
+        spoon = re.compile(r"(ч\.?\s*л|ст\.?\s*л|щепот|веточк|по вкусу|кончик)")
+        for i in items:
+            if i["grams"] is None and i["pieces"] is None and i["note"] != "по вкусу":
+                if re.search(r"\d", i["note"]) and not spoon.search(i["note"]):
+                    warnings.append(f"{rid}: «{i['name'][:34]} — {i['note'][:24]}» — "
+                                    f"единица не распознана. В граммах или "
+                                    f"штуках — иначе в список покупок не попадёт")
+        for i in items:
+            if len(i["name"]) > 80:
+                warnings.append(f"{rid}: очень длинная строка состава "
+                                f"«{i['name'][:50]}…» — похоже, это не продукт, "
+                                f"а примечание внутри списка")
+
+
 def main() -> int:
     rows = list(csv.DictReader(open(CSV_PATH, encoding="utf-8")))
     print(f"Позиций в базе: {len(rows)}, из них авторских рецептов: "
           f"{sum(1 for r in rows if r['kind'] != 'product')}\n")
     check_rows(rows)
     check_collection(rows)
+    check_ingredients(rows)
 
     for w in warnings:
         print(f"  ! {w}")
