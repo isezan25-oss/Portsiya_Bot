@@ -135,8 +135,10 @@ def set_prefer_tags(tg_id: int, items: list[str]) -> None:
                   (json.dumps(items, ensure_ascii=False), tg_id))
 
 
-def save_plan(tg_id: int, plan_date: date, recipe_ids: list[str], text: str) -> None:
-    payload = json.dumps({"recipe_ids": recipe_ids, "text": text}, ensure_ascii=False)
+def save_plan(tg_id: int, plan_date: date, recipe_ids: list[str], text: str,
+              quick: bool = False) -> None:
+    payload = json.dumps({"recipe_ids": recipe_ids, "text": text, "quick": quick},
+                         ensure_ascii=False)
     with connect() as c:
         c.execute("""INSERT INTO plans (telegram_id, plan_date, payload) VALUES (?,?,?)
                      ON CONFLICT(telegram_id, plan_date) DO UPDATE SET payload=excluded.payload""",

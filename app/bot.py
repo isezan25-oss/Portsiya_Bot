@@ -79,12 +79,18 @@ TRAINING_HINT = (
 # удалением профиля и повторным /start.
 DAILY_PLAN_LIMIT = 3
 
+# Режим «нет сил»: в план идут только блюда, которые готовятся не дольше.
+# Пустой cook_min — это продукты вроде яблока, их готовить не надо.
+MAX_QUICK_MIN = 20
+
 BTN_PLAN = "🍽 План на сегодня"
+BTN_QUICK = "😮‍💨 Нет сил: до 20 минут"
 BTN_PROFILE = "👤 Мой профиль"
 BTN_HELP = "❓ Помощь"
 
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_PLAN)],
+              [KeyboardButton(text=BTN_QUICK)],
               [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
 )
@@ -192,6 +198,12 @@ async def cmd_restart(m: Message, state: FSMContext):
 async def btn_plan(m: Message, state: FSMContext):
     await state.clear()
     await _send_plan(m, m.from_user.id)
+
+
+@dp.message(lambda m: bool(m.text) and "нет сил" in m.text.lower())
+async def btn_quick(m: Message, state: FSMContext):
+    await state.clear()
+    await _send_plan(m, m.from_user.id, regenerate=True, quick=True)
 
 
 @dp.message(lambda m: bool(m.text) and "мой профиль" in m.text.lower())
@@ -397,8 +409,13 @@ async def _send_throttled(m: Message, text: str, pause: float = 1.0) -> None:
     await asyncio.sleep(pause)
 
 
+def _quick_pool(pool: list) -> list:
+    return [r for r in pool
+            if not r.cook_min or float(str(r.cook_min).replace(",", ".")) <= MAX_QUICK_MIN]
+
+
 async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
-                     regenerate: bool = False):
+                     regenerate: bool = False, quick: bool = False):
     row = db.get_profile(tg_id)
     if not row:
         return await m.answer(
@@ -420,6 +437,8 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
     import json as _json
     t = _targets_from_row(row)
     pool = filter_recipes(RECIPES, _json.loads(row["exclusions"] or "[]"))
+    if quick:
+        pool = _quick_pool(pool)
     plans, notes = relax_and_build(
         t, pool, ADDONS, meals=row["meals_per_day"],
         recent_ids=db.recent_recipe_ids(tg_id),
@@ -430,13 +449,20 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
     text = format_plan(plan, t)
     if notes:
         text += "\n\n" + "\n".join(f"_{n}_" for n in notes)
-    db.save_plan(tg_id, today, [i.recipe.id for i in plan.items], text)
+    db.save_plan(tg_id, today, [i.recipe.id for i in plan.items], text, quick=quick)
+    if quick:
+        text += f"\n\n_Режим «нет сил»: всё готовится за {MAX_QUICK_MIN} минут или быстрее._"
     used = db.count_plan(tg_id, today)
     left = DAILY_PLAN_LIMIT - used
     if left <= 1:
         text += (f"\n\n_Это последний подбор на сегодня._" if left == 1
                  else "")
     await m.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=PLAN_BUTTONS)
+
+
+@dp.message(Command("quick"))
+async def cmd_quick(m: Message):
+    await _send_plan(m, m.from_user.id, regenerate=True, quick=True)
 
 
 @dp.message(Command("plan"))
@@ -453,7 +479,7 @@ async def cb_replan(c: CallbackQuery):
             "Рецепты на сегодня уже выданы — менять план можно до этого. "
             "Новый план будет завтра.", show_alert=True)
     await _send_plan(c.message, c.from_user.id, seed=random.randint(1, 10 ** 6),
-                     regenerate=True)
+                     regenerate=True, quick=bool(saved and saved.get("quick")))
     await c.answer()
 
 
@@ -602,6 +628,7 @@ async def main():
     bot = Bot(token=token)
     await bot.set_my_commands([
         BotCommand(command="plan", description="План питания на сегодня"),
+        BotCommand(command="quick", description="План без сил: до 20 минут"),
         BotCommand(command="replace", description="Собрать другой вариант"),
         BotCommand(command="profile", description="Параметры и норма"),
         BotCommand(command="restart", description="Заполнить параметры заново"),
@@ -609,6 +636,21 @@ async def main():
         BotCommand(command="delete", description="Удалить все данные"),
         BotCommand(command="help", description="Что умеет бот"),
     ])
+    # /stats — только владельцу: она и в меню появляется только у него.
+    admin = os.environ.get("ADMIN_ID")
+    if admin and admin.isdigit():
+        from aiogram.types import BotCommandScopeChat
+        await bot.set_my_commands(
+            [BotCommand(command="stats", description="Кто сколько рецептов собрал"),
+             BotCommand(command="plan", description="План питания на сегодня"),
+             BotCommand(command="quick", description="План без сил: до 20 минут"),
+             BotCommand(command="profile", description="Параметры и норма"),
+             BotCommand(command="help", description="Что умеет бот")],
+            scope=BotCommandScopeChat(chat_id=int(admin)))
+        logging.info("ADMIN_ID=%s, /stats доступна", admin)
+    else:
+        logging.warning("ADMIN_ID не задан — /stats не будет отвечать никому. "
+                        "Добавьте переменную в Railway, значение узнать у @userinfobot")
     await dp.start_polling(bot)
 
 
