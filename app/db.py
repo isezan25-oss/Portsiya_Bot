@@ -71,6 +71,22 @@ CREATE TABLE IF NOT EXISTS shopping (
     PRIMARY KEY (telegram_id, plan_date)
 );
 
+-- Профиль партнёра для ужина на двоих. Отдельной таблицей: это не второй
+-- пользователь бота, а параметры человека, который ест то же самое.
+CREATE TABLE IF NOT EXISTS partners (
+    telegram_id INTEGER PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+    sex         TEXT NOT NULL,
+    age         INTEGER NOT NULL,
+    height_cm   INTEGER NOT NULL,
+    weight_kg   REAL NOT NULL,
+    activity    TEXT NOT NULL,
+    goal        TEXT NOT NULL,
+    target_kcal INTEGER,
+    protein_g   INTEGER,
+    fat_g       INTEGER,
+    carb_g      INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS plans (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
@@ -206,6 +222,27 @@ def get_shopping(tg_id: int, day: date) -> dict | None:
         row = c.execute("SELECT payload FROM shopping WHERE telegram_id=? AND plan_date=?",
                         (tg_id, day.isoformat())).fetchone()
     return json.loads(row["payload"]) if row else None
+
+
+def save_partner(tg_id: int, p, t) -> None:
+    with connect() as c:
+        c.execute("""
+            INSERT INTO partners (telegram_id, sex, age, height_cm, weight_kg,
+                                  activity, goal, target_kcal, protein_g, fat_g, carb_g)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                sex=excluded.sex, age=excluded.age, height_cm=excluded.height_cm,
+                weight_kg=excluded.weight_kg, activity=excluded.activity,
+                goal=excluded.goal, target_kcal=excluded.target_kcal,
+                protein_g=excluded.protein_g, fat_g=excluded.fat_g, carb_g=excluded.carb_g
+        """, (tg_id, p.sex, p.age, p.height_cm, p.weight_kg, p.activity, p.goal,
+              t.kcal, t.protein_g, t.fat_g, t.carb_g))
+
+
+def get_partner(tg_id: int) -> dict | None:
+    with connect() as c:
+        row = c.execute("SELECT * FROM partners WHERE telegram_id=?", (tg_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def log_recipes(tg_id: int, recipe_ids: list[str]) -> int:

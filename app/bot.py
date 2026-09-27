@@ -20,7 +20,7 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, KeyboardButton, Message,
                            ReplyKeyboardMarkup)
 
-from . import db, recipes
+from . import db, family, recipes
 from .core import ACTIVITY, NotEligible, Profile, activity_factor, calculate
 from .planner import (format_plan, load_addons, load_recipes,
                       filter_recipes, relax_and_build)
@@ -112,12 +112,14 @@ MAX_QUICK_MIN = 20
 BTN_PLAN = "🍽 План на сегодня"
 BTN_QUICK = "😮‍💨 Нет сил: до 20 минут"
 BTN_SHOP = "🛒 Список продуктов"
+BTN_DINNER = "👩‍❤️‍👨 Ужин на двоих"
 BTN_PROFILE = "👤 Мой профиль"
 BTN_HELP = "❓ Помощь"
 
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_PLAN)],
               [KeyboardButton(text=BTN_QUICK), KeyboardButton(text=BTN_SHOP)],
+              [KeyboardButton(text=BTN_DINNER)],
               [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
 )
@@ -145,6 +147,18 @@ PREFERENCES = [
     ("Быстрые блюда", "быстро"),
     ("Вегетарианское", "вегетарианское"),
 ]
+
+
+class Partner(StatesGroup):
+    """Короткая анкета второго человека: только чтобы посчитать его норму.
+    Активность одним вопросом, а не четырьмя: отвечают за другого, и
+    подробности тут дают меньше точности, чем усталость от анкеты."""
+    sex = State()
+    age = State()
+    height = State()
+    weight = State()
+    activity = State()
+    goal = State()
 
 
 class Onboarding(StatesGroup):
@@ -677,6 +691,131 @@ async def cb_shop_toggle(c: CallbackQuery):
     await c.answer()
 
 
+# --- ужин на двоих ---
+
+async def _ask_partner(m: Message, state: FSMContext) -> None:
+    await state.set_state(Partner.sex)
+    await m.answer(
+        "Соберу ужин, который вы приготовите один раз, а съедите по-разному: "
+        "порции и добавки будут у каждого свои.\n\n"
+        "Шесть вопросов про второго человека. Отвечать заново не придётся.\n\n"
+        "Его пол?",
+        reply_markup=kb([[("Женский", "psex:female"), ("Мужской", "psex:male")]]))
+
+
+@dp.callback_query(Partner.sex, F.data.startswith("psex:"))
+async def p_sex(c: CallbackQuery, state: FSMContext):
+    await state.update_data(sex=c.data.split(":")[1])
+    await state.set_state(Partner.age)
+    await c.message.edit_text("Сколько ему лет?")
+    await c.answer()
+
+
+@dp.message(Partner.age)
+async def p_age(m: Message, state: FSMContext):
+    if not m.text.isdigit() or not (10 <= int(m.text) <= 100):
+        return await m.answer("Введите возраст числом, например 34.")
+    await state.update_data(age=int(m.text))
+    await state.set_state(Partner.height)
+    await m.answer("Рост в сантиметрах?")
+
+
+@dp.message(Partner.height)
+async def p_height(m: Message, state: FSMContext):
+    if not m.text.isdigit() or not (130 <= int(m.text) <= 230):
+        return await m.answer("Введите рост в сантиметрах, например 182.")
+    await state.update_data(height=int(m.text))
+    await state.set_state(Partner.weight)
+    await m.answer("Вес в килограммах?")
+
+
+@dp.message(Partner.weight)
+async def p_weight(m: Message, state: FSMContext):
+    try:
+        w = float(m.text.replace(",", "."))
+        assert 35 <= w <= 250
+    except (ValueError, AssertionError):
+        return await m.answer("Введите вес в килограммах, например 82.")
+    await state.update_data(weight=w)
+    await state.set_state(Partner.activity)
+    await m.answer("Насколько он активен?", reply_markup=kb(
+        [[(label, f"pact:{key}")] for label, key in ACTIVITY_OPTIONS]))
+
+
+@dp.callback_query(Partner.activity, F.data.startswith("pact:"))
+async def p_activity(c: CallbackQuery, state: FSMContext):
+    await state.update_data(activity=c.data.split(":")[1])
+    await state.set_state(Partner.goal)
+    await c.message.edit_text("Какая у него цель?", reply_markup=kb(
+        [[(v, f"pgoal:{k}")] for k, v in GOAL_RU.items()]))
+    await c.answer()
+
+
+@dp.callback_query(Partner.goal, F.data.startswith("pgoal:"))
+async def p_goal(c: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    await state.clear()
+    p = Profile(sex=d["sex"], age=d["age"], height_cm=d["height"],
+                weight_kg=d["weight"], activity=d["activity"],
+                goal=c.data.split(":")[1])
+    try:
+        t = calculate(p)
+    except NotEligible as e:
+        await c.message.edit_text(f"Для второго человека расчёт не подходит.\n\n{e}")
+        return await c.answer()
+    db.save_partner(c.from_user.id, p, t)
+    await c.message.edit_text(
+        f"Готово. Его норма: *{t.kcal} ккал*, белок {t.protein_g} г.",
+        parse_mode=ParseMode.MARKDOWN)
+    await c.answer()
+    await _send_dinner(c.message, c.from_user.id)
+
+
+async def _send_dinner(m: Message, tg_id: int) -> None:
+    row = db.get_profile(tg_id)
+    if not row:
+        return await m.answer("Сначала заполните свой профиль — /start",
+                              reply_markup=MAIN_KB)
+    partner = db.get_partner(tg_id)
+    if not partner:
+        return
+    pool = filter_recipes(RECIPES, _json_loads(row["exclusions"]))
+    options = family.build_dinner(
+        pool, ADDONS, row["target_kcal"], row["protein_g"],
+        partner["target_kcal"], partner["protein_g"],
+        meals=row["meals_per_day"])
+    if not options:
+        return await m.answer(
+            "Не нашёл ужина, который подошёл бы вам обоим. Обычно так бывает, "
+            "когда нормы различаются больше чем втрое — тогда одним блюдом не "
+            "обойтись, проще приготовить разное.", reply_markup=MAIN_KB)
+    import random
+    choice = random.choice(options)
+    await m.answer(family.format_dinner(choice, "Вам", "Второму"),
+                   parse_mode=ParseMode.MARKDOWN, reply_markup=MAIN_KB)
+
+
+def _json_loads(raw):
+    import json
+    return json.loads(raw or "[]")
+
+
+@dp.message(Command("dinner"))
+async def cmd_dinner(m: Message, state: FSMContext):
+    await state.clear()
+    if not db.get_profile(m.from_user.id):
+        return await m.answer("Сначала заполните свой профиль — /start",
+                              reply_markup=MAIN_KB)
+    if db.get_partner(m.from_user.id):
+        return await _send_dinner(m, m.from_user.id)
+    await _ask_partner(m, state)
+
+
+@dp.message(lambda m: bool(m.text) and "ужин на двоих" in m.text.lower())
+async def btn_dinner(m: Message, state: FSMContext):
+    await cmd_dinner(m, state)
+
+
 @dp.message(Command("replace"))
 async def cmd_replace(m: Message):
     await _send_plan(m, m.from_user.id, seed=int(date.today().strftime("%j")) + 7,
@@ -734,6 +873,7 @@ async def cmd_help(m: Message):
         "/plan — план питания на сегодня\n"
         "/quick — план из блюд до 20 минут\n"
         "/shop — список продуктов на день\n"
+        "/dinner — ужин на двоих: одно блюдо, разные порции\n"
         "/replace — собрать другой вариант\n"
         "/profile — ваши параметры и норма\n"
         "/restart — заполнить параметры заново\n"
@@ -747,7 +887,7 @@ async def cmd_help(m: Message):
 # только если ничего выше не подошло. ---
 
 ONBOARDING_PREFIXES = {"sex", "act", "steps", "feet", "work", "labor",
-                       "goal", "meals", "alg", "prf"}
+                       "goal", "meals", "alg", "prf", "psex", "pact", "pgoal"}
 
 
 @dp.callback_query(lambda c: bool(c.data) and c.data.split(":")[0] in ONBOARDING_PREFIXES)
@@ -793,6 +933,7 @@ async def main():
         BotCommand(command="plan", description="План питания на сегодня"),
         BotCommand(command="quick", description="План без сил: до 20 минут"),
         BotCommand(command="shop", description="Список продуктов на день"),
+        BotCommand(command="dinner", description="Ужин на двоих"),
         BotCommand(command="replace", description="Собрать другой вариант"),
         BotCommand(command="profile", description="Параметры и норма"),
         BotCommand(command="restart", description="Заполнить параметры заново"),
