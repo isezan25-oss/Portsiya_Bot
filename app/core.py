@@ -29,6 +29,11 @@ STEPS_PAL = [(4000, 0.00), (7000, 0.06), (10000, 0.12), (13000, 0.18), (10 ** 9,
 FEET_PAL = [(1, 0.00), (4, 0.05), (7, 0.10), (25, 0.15)]
 # тренировок в неделю
 WORKOUT_PAL = [(1, 0.00), (3, 0.055), (5, 0.12), (7, 0.18), (99, 0.25)]
+# тяжёлый физический труд: носить тяжести, работать руками смену напролёт.
+# Это не то же самое, что быть на ногах: медсестра стоит, а грузчик таскает.
+# Слагаемое ровно 0.06 — столько не хватало опросу, чтобы дотянуться до 1.9,
+# то есть до прежнего значения «физический труд плюс тренировки».
+LABOR_PAL = [(1, 0.00), (2, 0.03), (99, 0.06)]
 
 PAL_MIN, PAL_MAX = 1.2, 1.9
 
@@ -40,10 +45,13 @@ def _step(table: list[tuple[float, float]], value: float) -> float:
     return table[-1][1]
 
 
-def activity_factor(steps: int, feet_hours: float, workouts: int) -> float:
-    """Коэффициент активности по измеримым ответам, а не по самооценке."""
+def activity_factor(steps: int, feet_hours: float, workouts: int,
+                    labor: int = 0) -> float:
+    """Коэффициент активности по измеримым ответам, а не по самооценке.
+
+    labor: 0 — нет физического труда, 1 — иногда, 2 — каждый день."""
     pal = (PAL_BASE + _step(STEPS_PAL, steps) + _step(FEET_PAL, feet_hours)
-           + _step(WORKOUT_PAL, workouts))
+           + _step(WORKOUT_PAL, workouts) + _step(LABOR_PAL, labor))
     return round(min(max(pal, PAL_MIN), PAL_MAX), 3)
 
 

@@ -51,6 +51,11 @@ FEET_OPTIONS = [
     ("4–6 часов", 5),
     ("Весь день на ногах", 8),
 ]
+LABOR_OPTIONS = [
+    ("Нет", 0),
+    ("Иногда, пару раз в неделю", 1),
+    ("Да, почти каждый день", 2),
+]
 WORKOUT_OPTIONS = [
     ("Не тренируюсь", 0),
     ("1–2 в неделю", 2),
@@ -148,6 +153,7 @@ class Onboarding(StatesGroup):
     steps = State()
     feet = State()
     workouts = State()
+    labor = State()
     goal = State()
     meals = State()
     allergens = State()
@@ -277,7 +283,7 @@ async def on_weight(m: Message, state: FSMContext):
     await state.update_data(weight=w)
     await state.set_state(Onboarding.steps)
     await m.answer(
-        "Теперь про активность — три коротких вопроса. Отвечайте как есть: "
+        "Теперь про активность — четыре коротких вопроса. Отвечайте как есть: "
         "коэффициент я посчитаю сам, и от него напрямую зависит ваша норма.\n\n"
         "Сколько шагов в день вы проходите в среднем? Посмотрите в телефоне, "
         "он считает это сам.",
@@ -308,10 +314,23 @@ async def on_feet(c: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(Onboarding.workouts, F.data.startswith("work:"))
 async def on_workouts(c: CallbackQuery, state: FSMContext):
+    await state.update_data(workouts=int(c.data.split(":")[1]))
+    await state.set_state(Onboarding.labor)
+    await c.message.edit_text(
+        "Последний вопрос про активность. Есть ли у вас тяжёлый физический "
+        "труд — носить тяжести, работать руками смену напролёт: стройка, "
+        "склад, цех, уход за лежачим?\n\nПросто быть на ногах — это не он, "
+        "про ноги я уже спросил.",
+        reply_markup=kb([[(label, f"labor:{v}")] for label, v in LABOR_OPTIONS]))
+    await c.answer()
+
+
+@dp.callback_query(Onboarding.labor, F.data.startswith("labor:"))
+async def on_labor(c: CallbackQuery, state: FSMContext):
     d = await state.get_data()
-    workouts = int(c.data.split(":")[1])
-    factor = activity_factor(d["steps"], d["feet"], workouts)
-    await state.update_data(workouts=workouts, factor=factor)
+    labor = int(c.data.split(":")[1])
+    factor = activity_factor(d["steps"], d["feet"], d["workouts"], labor)
+    await state.update_data(labor=labor, factor=factor)
     await state.set_state(Onboarding.goal)
     await c.message.edit_text(
         f"Ваш коэффициент активности: *{factor}*.\n\nКакая у вас цель?",
@@ -704,7 +723,8 @@ async def cmd_help(m: Message):
 # --- запасные обработчики. Регистрируются последними, поэтому срабатывают
 # только если ничего выше не подошло. ---
 
-ONBOARDING_PREFIXES = {"sex", "act", "goal", "meals", "alg", "prf"}
+ONBOARDING_PREFIXES = {"sex", "act", "steps", "feet", "work", "labor",
+                       "goal", "meals", "alg", "prf"}
 
 
 @dp.callback_query(lambda c: bool(c.data) and c.data.split(":")[0] in ONBOARDING_PREFIXES)
