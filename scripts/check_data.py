@@ -19,7 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "data" / "recipes.csv"
 COLLECTION = ROOT / "docs" / "10-сборник-рецептов.md"
 
-ALLERGENS = {"молоко", "глютен", "яйцо", "орехи", "рыба", "соя", "арахис", "кунжут"}
+ALLERGENS = {"молоко", "глютен", "яйцо", "орехи", "рыба", "соя", "арахис",
+              "кунжут", "морепродукты"}
 MEALS = {"breakfast", "lunch", "dinner", "snack"}
 DENSITY_TAGS = {"высокобелковое": (0.070, 9.9),
                 "среднебелковое": (0.037, 0.0699),
