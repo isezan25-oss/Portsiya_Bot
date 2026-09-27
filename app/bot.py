@@ -513,7 +513,8 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
     text = format_plan(plan, t)
     if notes:
         text += "\n\n" + "\n".join(f"_{n}_" for n in notes)
-    db.save_plan(tg_id, today, [i.recipe.id for i in plan.items], text, quick=quick)
+    db.save_plan(tg_id, today, [i.recipe.id for i in plan.items], text,
+                 quick=quick, scales=[i.scale for i in plan.items])
     if quick:
         text += f"\n\n_Режим «нет сил»: всё готовится за {MAX_QUICK_MIN} минут или быстрее._"
     used = db.count_plan(tg_id, today)
@@ -578,7 +579,62 @@ async def cb_recipes(c: CallbackQuery):
     await c.message.answer(
         f"Это все рецепты на сегодня ({sent}).{tail}\n\n"
         f"План на сегодня зафиксирован — заменить блюда уже нельзя. "
-        f"Новый план соберётся завтра.")
+        f"Новый план соберётся завтра.",
+        reply_markup=kb([[("🛒 Список продуктов", "shoplist")]]))
+
+
+def _shopping_view(items: list[str], checked: set[int]) -> tuple[str, InlineKeyboardMarkup]:
+    """Текст со списком и клавиатура из номеров. Номера, а не названия:
+    сорок кнопок с текстом не помещаются на экран телефона."""
+    from html import escape
+    lines = ["<b>Список продуктов на день</b>", ""]
+    for n, item in enumerate(items, 1):
+        body = escape(item)
+        lines.append(f"{n}. <s>{body}</s>" if n - 1 in checked else f"{n}. {body}")
+    lines.append("")
+    lines.append(f"Отмечено {len(checked)} из {len(items)}. "
+                 f"Нажмите номер, чтобы вычеркнуть то, что уже есть.")
+    rows, row = [], []
+    for n in range(1, len(items) + 1):
+        row.append((f"{'·' if n - 1 in checked else ''}{n}", f"shop:{n - 1}"))
+        if len(row) == 5:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([("Снять все отметки", "shop:reset")])
+    return "\n".join(lines), kb(rows)
+
+
+@dp.callback_query(F.data == "shoplist")
+async def cb_shoplist(c: CallbackQuery):
+    saved = db.get_plan(c.from_user.id, date.today())
+    if not saved:
+        return await c.answer("Сначала соберите план.", show_alert=True)
+    await c.answer()
+    scales = saved.get("scales") or [1.0] * len(saved["recipe_ids"])
+    items = recipes.shopping_list(list(zip(saved["recipe_ids"], scales)))
+    if not items:
+        return await c.message.answer("Для этого плана состав не указан.")
+    db.save_shopping(c.from_user.id, date.today(), items, [])
+    text, markup = _shopping_view(items, set())
+    await c.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+@dp.callback_query(F.data.startswith("shop:"))
+async def cb_shop_toggle(c: CallbackQuery):
+    data = db.get_shopping(c.from_user.id, date.today())
+    if not data:
+        return await c.answer("Список устарел, соберите заново.", show_alert=True)
+    checked = set(data["checked"])
+    value = c.data.split(":", 1)[1]
+    if value == "reset":
+        checked.clear()
+    else:
+        checked.symmetric_difference_update({int(value)})
+    db.save_shopping(c.from_user.id, date.today(), data["items"], sorted(checked))
+    text, markup = _shopping_view(data["items"], checked)
+    await c.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    await c.answer()
 
 
 @dp.message(Command("replace"))

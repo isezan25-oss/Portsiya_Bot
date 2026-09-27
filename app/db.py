@@ -63,6 +63,14 @@ CREATE TABLE IF NOT EXISTS recipe_log (
     PRIMARY KEY (telegram_id, recipe_id)
 );
 
+-- Список покупок на день: сами строки и какие из них отмечены.
+CREATE TABLE IF NOT EXISTS shopping (
+    telegram_id INTEGER NOT NULL,
+    plan_date   TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    PRIMARY KEY (telegram_id, plan_date)
+);
+
 CREATE TABLE IF NOT EXISTS plans (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
@@ -148,8 +156,9 @@ def set_prefer_tags(tg_id: int, items: list[str]) -> None:
 
 
 def save_plan(tg_id: int, plan_date: date, recipe_ids: list[str], text: str,
-              quick: bool = False) -> None:
-    payload = json.dumps({"recipe_ids": recipe_ids, "text": text, "quick": quick},
+              quick: bool = False, scales: list[float] | None = None) -> None:
+    payload = json.dumps({"recipe_ids": recipe_ids, "text": text, "quick": quick,
+                          "scales": scales or [1.0] * len(recipe_ids)},
                          ensure_ascii=False)
     with connect() as c:
         c.execute("""INSERT INTO plans (telegram_id, plan_date, payload) VALUES (?,?,?)
@@ -182,6 +191,21 @@ def count_plan(tg_id: int, day: date) -> int:
         row = c.execute("SELECT plans FROM daily_usage WHERE telegram_id=? AND usage_date=?",
                         (tg_id, day.isoformat())).fetchone()
     return row["plans"]
+
+
+def save_shopping(tg_id: int, day: date, items: list[str], checked: list[int]) -> None:
+    with connect() as c:
+        c.execute("""INSERT INTO shopping (telegram_id, plan_date, payload) VALUES (?,?,?)
+                     ON CONFLICT(telegram_id, plan_date) DO UPDATE SET payload=excluded.payload""",
+                  (tg_id, day.isoformat(),
+                   json.dumps({"items": items, "checked": checked}, ensure_ascii=False)))
+
+
+def get_shopping(tg_id: int, day: date) -> dict | None:
+    with connect() as c:
+        row = c.execute("SELECT payload FROM shopping WHERE telegram_id=? AND plan_date=?",
+                        (tg_id, day.isoformat())).fetchone()
+    return json.loads(row["payload"]) if row else None
 
 
 def log_recipes(tg_id: int, recipe_ids: list[str]) -> int:

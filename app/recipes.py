@@ -48,6 +48,75 @@ def card(recipe_id: str) -> str | None:
     return CARDS.get(recipe_id)
 
 
+GRAMS_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:–|-)?\s*(\d+(?:[.,]\d+)?)?\s*(г|мл)\b")
+PREFIX_RE = re.compile(r"^Для [^:]{0,40}:\s*")
+
+
+def _parse_item(raw: str) -> dict | None:
+    """«Куриное филе — 150 г» -> {'name': ..., 'grams': 150.0, 'note': '150 г'}."""
+    text = PREFIX_RE.sub("", raw.strip(" -•"))
+    if not text:
+        return None
+    if "—" not in text:
+        # специи и «по желанию»: веса нет, но в списке покупок они нужны
+        return {"name": text.rstrip("."), "grams": None, "note": "по вкусу"}
+    name, _, amount = text.partition("—")
+    name = name.strip().rstrip(",").strip()
+    amount = amount.strip()
+    m = GRAMS_RE.search(amount)
+    grams = None
+    if m:
+        lo = float(m.group(1).replace(",", "."))
+        hi = float(m.group(2).replace(",", ".")) if m.group(2) else lo
+        grams = (lo + hi) / 2
+    return {"name": name, "grams": grams, "note": amount}
+
+
+def ingredients(recipe_id: str) -> list[dict]:
+    """Состав блюда из карточки сборника."""
+    text = CARDS.get(recipe_id)
+    if not text:
+        return []
+    block = re.search(r"^Ингредиенты\s*$(.+?)^Приготовление по шагам",
+                      text, re.S | re.M)
+    if not block:
+        return []
+    out = []
+    for line in block.group(1).strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        for part in line.split(";"):
+            item = _parse_item(part)
+            if item and item["name"]:
+                out.append(item)
+    return out
+
+
+def shopping_list(plan_items: list[tuple[str, float]]) -> list[str]:
+    """Список покупок по плану: [(id блюда, множитель порции)] -> строки.
+
+    Одинаковые продукты складываются, граммовка умножается на множитель —
+    иначе список не совпадёт с тем, что человек реально положит в тарелку."""
+    totals: dict[str, float] = {}
+    loose: dict[str, None] = {}
+    for rid, scale in plan_items:
+        for item in ingredients(rid):
+            key = item["name"][0].upper() + item["name"][1:]
+            if item["grams"] is None:
+                loose.setdefault(key, None)
+            else:
+                totals[key] = totals.get(key, 0) + item["grams"] * scale
+    lines = [f"{name} — {round(g / 5) * 5 if g >= 20 else round(g)} г"
+             for name, g in sorted(totals.items())]
+    # Специи и «по вкусу» — одной строкой: в списке покупок это обычно то,
+    # что уже есть дома, и сорок отдельных пунктов только мешают.
+    spices = sorted(n.lower() for n in loose if n not in totals)
+    if spices:
+        lines.append("Специи и по вкусу: " + ", ".join(spices))
+    return lines
+
+
 def pack(cards: list[str], limit: int = TELEGRAM_LIMIT) -> list[str]:
     """Складывает карточки в наименьшее число сообщений: Telegram пропускает
     около одного сообщения в секунду на чат, и восемь подряд ловят 429."""
