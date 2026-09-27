@@ -239,31 +239,51 @@ async def cmd_restart(m: Message, state: FSMContext):
     await _ask_sex(m, state)
 
 
-@dp.message(lambda m: bool(m.text) and "план на сегодня" in m.text.lower())
+def _is_admin(tg_id: int) -> bool:
+    """Владелец бота — ADMIN_ID в окружении. Если переменной нет, владельца нет
+    ни у одной команды: лучше не работает ни у кого, чем работает у всех."""
+    admin = os.environ.get("ADMIN_ID")
+    return bool(admin) and str(tg_id) == admin
+
+
+def _norm(text: str) -> str:
+    """Буквы, цифры и пробелы — всё остальное (эмодзи, двоеточия) убираем."""
+    keep = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text.lower())
+    return " ".join(keep.split())
+
+
+def _pressed(text: str | None, label: str):
+    """Сообщение — это ровно нажатие кнопки, а не текст, где её название просто
+    встретилось. Раньше проверялось вхождением подстроки, и объявление о
+    рассылке со словами «нет сил» уходило в подбор плана вместо /announce."""
+    return bool(text) and _norm(text) == _norm(label)
+
+
+@dp.message(lambda m: _pressed(m.text, BTN_PLAN))
 async def btn_plan(m: Message, state: FSMContext):
     await state.clear()
     await _send_plan(m, m.from_user.id)
 
 
-@dp.message(lambda m: bool(m.text) and "нет сил" in m.text.lower())
+@dp.message(lambda m: _pressed(m.text, BTN_QUICK))
 async def btn_quick(m: Message, state: FSMContext):
     await state.clear()
     await _send_plan(m, m.from_user.id, regenerate=True, quick=True)
 
 
-@dp.message(lambda m: bool(m.text) and "список продуктов" in m.text.lower())
+@dp.message(lambda m: _pressed(m.text, BTN_SHOP))
 async def btn_shop(m: Message, state: FSMContext):
     await state.clear()
     await _send_shopping(m, m.from_user.id)
 
 
-@dp.message(lambda m: bool(m.text) and "мой профиль" in m.text.lower())
+@dp.message(lambda m: _pressed(m.text, BTN_PROFILE))
 async def btn_profile(m: Message, state: FSMContext):
     await state.clear()
     await cmd_profile(m)
 
 
-@dp.message(lambda m: bool(m.text) and m.text.lower().strip("❓ ") == "помощь")
+@dp.message(lambda m: _pressed(m.text, BTN_HELP))
 async def btn_help(m: Message, state: FSMContext):
     await state.clear()
     await cmd_help(m)
@@ -534,7 +554,8 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
         # Уже собранный план показываем как есть: просмотр попытку не тратит.
         return await m.answer(saved["text"], parse_mode=ParseMode.MARKDOWN,
                               reply_markup=PLAN_BUTTONS)
-    if db.plans_today(tg_id, today) >= DAILY_PLAN_LIMIT:
+    # Владелец вне лимита: ему нужно проверять бота, а не экономить попытки.
+    if not _is_admin(tg_id) and db.plans_today(tg_id, today) >= DAILY_PLAN_LIMIT:
         return await m.answer(
             f"На сегодня лимит: {DAILY_PLAN_LIMIT} подбора в день. "
             f"Завтра соберу новый план.\n\n"
@@ -811,7 +832,7 @@ async def cmd_dinner(m: Message, state: FSMContext):
     await _ask_partner(m, state)
 
 
-@dp.message(lambda m: bool(m.text) and "ужин на двоих" in m.text.lower())
+@dp.message(lambda m: _pressed(m.text, BTN_DINNER))
 async def btn_dinner(m: Message, state: FSMContext):
     await cmd_dinner(m, state)
 
@@ -847,13 +868,6 @@ async def cmd_delete(m: Message):
                    "нет ваших параметров, только числа.")
 
 
-def _is_admin(tg_id: int) -> bool:
-    """Владелец бота — ADMIN_ID в окружении. Если переменной нет, владельца нет
-    ни у одной команды: лучше не работает ни у кого, чем работает у всех."""
-    admin = os.environ.get("ADMIN_ID")
-    return bool(admin) and str(tg_id) == admin
-
-
 @dp.message(Command("stats"))
 async def cmd_stats(m: Message):
     """Кто сколько собрал. Видна только владельцу — ADMIN_ID в окружении."""
@@ -879,8 +893,11 @@ ANNOUNCE_HELP = (
     "Рассылка объявления.\n\n"
     "Отправьте одним сообщением:\n"
     "`/announce` и с новой строки текст.\n\n"
-    "Бот сначала покажет, как объявление увидят люди, и спросит подтверждение. "
-    "Разметка — как в боте: `*жирный*`, `_курсив_`.")
+    "Бот покажет, как объявление увидят люди, и спросит подтверждение.\n"
+    "Оформление берётся из вашего же сообщения: как выделили жирным или "
+    "курсивом в Телеграме, так и уйдёт. Возиться со звёздочками не нужно.")
+
+MAX_ANNOUNCE = 4096
 
 
 def _announce_kb(bid: int, resume: bool = False) -> InlineKeyboardMarkup:
@@ -893,23 +910,29 @@ async def cmd_announce(m: Message, state: FSMContext):
     if not _is_admin(m.from_user.id):
         return
     await state.clear()
-    parts = (m.text or "").split(maxsplit=1)
+    # html_text, а не text: клиент Телеграма съедает звёздочки и превращает их
+    # в оформление самого сообщения, так что в text разметки уже нет. Из
+    # html_text она восстанавливается, и подписчики видят ровно то же, что
+    # видит владелец в своём сообщении.
+    parts = m.html_text.split(maxsplit=1) if m.text else []
     text = parts[1].strip() if len(parts) > 1 else ""
 
     if not text:
         return await _announce_status(m)
 
-    # Показ объявления — он же проверка разметки. Легаси-Markdown ломается на
-    # одиночных _ * [ ] `, и если текст неверный, Телеграм откажет здесь, на
-    # владельце, а не на середине рассылки.
+    if len(text) > MAX_ANNOUNCE:
+        return await m.answer(
+            f"Объявление длиннее {MAX_ANNOUNCE} символов ({len(text)}), одним "
+            f"сообщением Телеграм его не примет. Сократите или разбейте на две "
+            f"рассылки.")
+
+    # Показ объявления — он же проверка: если Телеграм текст не примет, откажет
+    # здесь, на владельце, а не на середине рассылки.
     try:
-        await m.answer(text, parse_mode=ParseMode.MARKDOWN)
+        await m.answer(text, parse_mode=ParseMode.HTML)
     except TelegramBadRequest as e:
         return await m.answer(
-            "Так отправить не получится: Телеграм не принял разметку.\n"
-            f"`{e.message}`\n\n"
-            "Обычно виноват одиночный символ _ * ` [ ] в тексте. Уберите его "
-            "или продублируйте.", parse_mode=ParseMode.MARKDOWN)
+            f"Так отправить не получится, Телеграм отказал:\n{e.message}")
 
     bid = db.new_broadcast(text)
     await m.answer(f"Так увидят объявление {db.audience()} чел. Отправляем?",
@@ -963,7 +986,7 @@ async def cb_announce_send(c: CallbackQuery):
                              f"около {max(1, round(len(targets) * broadcast.PAUSE / 60))} мин.")
 
     async def send(tg_id: int, text: str) -> None:
-        await c.bot.send_message(tg_id, text, parse_mode=ParseMode.MARKDOWN,
+        await c.bot.send_message(tg_id, text, parse_mode=ParseMode.HTML,
                                  disable_web_page_preview=True)
 
     rep = await broadcast.deliver(
