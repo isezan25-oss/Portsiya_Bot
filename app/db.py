@@ -88,9 +88,18 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _migrate(c) -> None:
+    """Добавляет колонки, появившиеся после первого запуска. CREATE TABLE IF
+    NOT EXISTS существующую таблицу не меняет, поэтому нужен явный ALTER."""
+    have = {r["name"] for r in c.execute("PRAGMA table_info(profiles)")}
+    if "activity_factor" not in have:
+        c.execute("ALTER TABLE profiles ADD COLUMN activity_factor REAL")
+
+
 def init() -> None:
     with connect() as c:
         c.executescript(SCHEMA)
+        _migrate(c)
 
 
 def ensure_user(tg_id: int) -> None:
@@ -103,18 +112,21 @@ def save_profile(tg_id: int, p, t) -> None:
     with connect() as c:
         c.execute("""
             INSERT INTO profiles (telegram_id, sex, age, height_cm, weight_kg, activity,
-                                  goal, meals_per_day, target_kcal, protein_g, fat_g,
+                                  goal, meals_per_day, activity_factor,
+                                  target_kcal, protein_g, fat_g,
                                   carb_g, calculated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
             ON CONFLICT(telegram_id) DO UPDATE SET
                 sex=excluded.sex, age=excluded.age, height_cm=excluded.height_cm,
                 weight_kg=excluded.weight_kg, activity=excluded.activity,
                 goal=excluded.goal, meals_per_day=excluded.meals_per_day,
+                activity_factor=excluded.activity_factor,
                 target_kcal=excluded.target_kcal, protein_g=excluded.protein_g,
                 fat_g=excluded.fat_g, carb_g=excluded.carb_g,
                 calculated_at=CURRENT_TIMESTAMP
         """, (tg_id, p.sex, p.age, p.height_cm, p.weight_kg, p.activity, p.goal,
-              p.meals_per_day, t.kcal, t.protein_g, t.fat_g, t.carb_g))
+              p.meals_per_day, p.activity_factor,
+              t.kcal, t.protein_g, t.fat_g, t.carb_g))
 
 
 def get_profile(tg_id: int) -> dict | None:

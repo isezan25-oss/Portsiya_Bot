@@ -21,7 +21,7 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
                            ReplyKeyboardMarkup)
 
 from . import db, recipes
-from .core import ACTIVITY, NotEligible, Profile, calculate
+from .core import ACTIVITY, NotEligible, Profile, activity_factor, calculate
 from .planner import (format_plan, load_addons, load_recipes,
                       filter_recipes, relax_and_build)
 
@@ -38,6 +38,27 @@ DISCLAIMER = (
 # Варианты в онбординге и коэффициент, к которому каждый ведёт. Список, а не
 # словарь: «активная работа» и «3–5 тренировок» дают одну и ту же нагрузку,
 # но человеку это разные ответы. Сами коэффициенты — в core.ACTIVITY.
+STEPS_OPTIONS = [
+    ("Меньше 4 тысяч", 3000),
+    ("4–7 тысяч", 5500),
+    ("7–10 тысяч", 8500),
+    ("10–13 тысяч", 11500),
+    ("Больше 13 тысяч", 14000),
+]
+FEET_OPTIONS = [
+    ("Почти всё время сижу", 0),
+    ("1–3 часа на ногах", 2),
+    ("4–6 часов", 5),
+    ("Весь день на ногах", 8),
+]
+WORKOUT_OPTIONS = [
+    ("Не тренируюсь", 0),
+    ("1–2 в неделю", 2),
+    ("3–4 в неделю", 3),
+    ("5–6 в неделю", 5),
+    ("Каждый день", 7),
+]
+
 ACTIVITY_OPTIONS = [
     ("Сидячий образ жизни, без тренировок", "sedentary"),
     ("Сидячий образ жизни + 1–3 тренировки", "light"),
@@ -124,7 +145,9 @@ class Onboarding(StatesGroup):
     age = State()
     height = State()
     weight = State()
-    activity = State()
+    steps = State()
+    feet = State()
+    workouts = State()
     goal = State()
     meals = State()
     allergens = State()
@@ -252,19 +275,48 @@ async def on_weight(m: Message, state: FSMContext):
     except (ValueError, AssertionError):
         return await m.answer("Введите вес в килограммах, например 68 или 68.5.")
     await state.update_data(weight=w)
-    await state.set_state(Onboarding.activity)
+    await state.set_state(Onboarding.steps)
     await m.answer(
-        f"Насколько вы активны?\n\n_{TRAINING_HINT}_",
+        "Теперь про активность — три коротких вопроса. Отвечайте как есть: "
+        "коэффициент я посчитаю сам, и от него напрямую зависит ваша норма.\n\n"
+        "Сколько шагов в день вы проходите в среднем? Посмотрите в телефоне, "
+        "он считает это сам.",
+        reply_markup=kb([[(label, f"steps:{v}")] for label, v in STEPS_OPTIONS]))
+
+
+@dp.callback_query(Onboarding.steps, F.data.startswith("steps:"))
+async def on_steps(c: CallbackQuery, state: FSMContext):
+    await state.update_data(steps=int(c.data.split(":")[1]))
+    await state.set_state(Onboarding.feet)
+    await c.message.edit_text(
+        "Сколько часов в день вы на ногах помимо ходьбы? Это стоячая работа, "
+        "уборка, дети, магазины — всё, что делается не сидя.",
+        reply_markup=kb([[(label, f"feet:{v}")] for label, v in FEET_OPTIONS]))
+    await c.answer()
+
+
+@dp.callback_query(Onboarding.feet, F.data.startswith("feet:"))
+async def on_feet(c: CallbackQuery, state: FSMContext):
+    await state.update_data(feet=int(c.data.split(":")[1]))
+    await state.set_state(Onboarding.workouts)
+    await c.message.edit_text(
+        f"Сколько тренировок в неделю?\n\n_{TRAINING_HINT}_",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([[(label, f"act:{key}")] for label, key in ACTIVITY_OPTIONS]))
+        reply_markup=kb([[(label, f"work:{v}")] for label, v in WORKOUT_OPTIONS]))
+    await c.answer()
 
 
-@dp.callback_query(Onboarding.activity, F.data.startswith("act:"))
-async def on_activity(c: CallbackQuery, state: FSMContext):
-    await state.update_data(activity=c.data.split(":")[1])
+@dp.callback_query(Onboarding.workouts, F.data.startswith("work:"))
+async def on_workouts(c: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    workouts = int(c.data.split(":")[1])
+    factor = activity_factor(d["steps"], d["feet"], workouts)
+    await state.update_data(workouts=workouts, factor=factor)
     await state.set_state(Onboarding.goal)
-    await c.message.edit_text("Какая у вас цель?", reply_markup=kb(
-        [[(v, f"goal:{k}")] for k, v in GOAL_RU.items()]))
+    await c.message.edit_text(
+        f"Ваш коэффициент активности: *{factor}*.\n\nКакая у вас цель?",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([[(v, f"goal:{k}")] for k, v in GOAL_RU.items()]))
     await c.answer()
 
 
@@ -344,9 +396,13 @@ async def on_prefers(c: CallbackQuery, state: FSMContext):
 
 
 async def _finish_onboarding(c: CallbackQuery, d: dict):
+    factor = d.get("factor")
+    # ключ нужен только для подписи в профиле: в расчёт идёт коэффициент
+    nearest = min(ACTIVITY, key=lambda k: abs(ACTIVITY[k] - (factor or 1.55)))
     p = Profile(sex=d["sex"], age=d["age"], height_cm=d["height"],
-                weight_kg=d["weight"], activity=d["activity"], goal=d["goal"],
-                meals_per_day=d.get("meals", 4))
+                weight_kg=d["weight"], activity=d.get("activity", nearest),
+                goal=d["goal"], meals_per_day=d.get("meals", 4),
+                activity_factor=factor)
     try:
         t = calculate(p)
     except NotEligible as e:
@@ -384,6 +440,14 @@ async def _finish_onboarding(c: CallbackQuery, d: dict):
         f"Нажмите «{BTN_PLAN}» — соберу меню на сегодня.",
         reply_markup=MAIN_KB)
     await c.answer()
+
+
+def _activity_line(row: dict) -> str:
+    """Строка активности в профиле: коэффициент, если он посчитан по опросу."""
+    factor = row.get("activity_factor")
+    if factor:
+        return f"Коэффициент активности {factor}"
+    return ACTIVITY_RU.get(row["activity"], row["activity"])
 
 
 def _targets_from_row(row: dict):
@@ -532,7 +596,7 @@ async def cmd_profile(m: Message):
         f"*Ваш профиль*\n"
         f"{'Женский' if row['sex'] == 'female' else 'Мужской'} пол, {row['age']} лет\n"
         f"{row['height_cm']} см, {row['weight_kg']} кг\n"
-        f"{ACTIVITY_RU[row['activity']]}\n"
+        f"{_activity_line(row)}\n"
         f"Цель: {GOAL_RU[row['goal']]}\n\n"
         f"*Норма:* {row['target_kcal']} ккал · Б {row['protein_g']} · "
         f"Ж {row['fat_g']} · У {row['carb_g']}\n\n"

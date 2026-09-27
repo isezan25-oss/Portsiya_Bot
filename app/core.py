@@ -16,6 +16,37 @@ ACTIVITY = {
     "athlete": 1.9,
 }
 
+# Коэффициент активности из трёх измеримых ответов вместо одного абстрактного
+# выбора. База 1.2 — сидячий человек без нагрузки, к ней прибавляются три
+# слагаемых. Шкала подобрана так, чтобы воспроизводить привычные значения
+# ACTIVITY: 7000 шагов и пара тренировок дают 1.375, 10 000 шагов, немного
+# на ногах и 3-4 тренировки — 1.55. Проверка соответствия — в tests ниже по
+# документации, раздел «Активность» в docs/02.
+PAL_BASE = 1.2
+# среднее число шагов в день
+STEPS_PAL = [(4000, 0.00), (7000, 0.06), (10000, 0.12), (13000, 0.18), (10 ** 9, 0.24)]
+# часов в день на ногах помимо ходьбы: стоячая работа, уборка, дети
+FEET_PAL = [(1, 0.00), (4, 0.05), (7, 0.10), (25, 0.15)]
+# тренировок в неделю
+WORKOUT_PAL = [(1, 0.00), (3, 0.055), (5, 0.12), (7, 0.18), (99, 0.25)]
+
+PAL_MIN, PAL_MAX = 1.2, 1.9
+
+
+def _step(table: list[tuple[float, float]], value: float) -> float:
+    for threshold, add in table:
+        if value < threshold:
+            return add
+    return table[-1][1]
+
+
+def activity_factor(steps: int, feet_hours: float, workouts: int) -> float:
+    """Коэффициент активности по измеримым ответам, а не по самооценке."""
+    pal = (PAL_BASE + _step(STEPS_PAL, steps) + _step(FEET_PAL, feet_hours)
+           + _step(WORKOUT_PAL, workouts))
+    return round(min(max(pal, PAL_MIN), PAL_MAX), 3)
+
+
 GOAL_ADJ = {"cut": -0.15, "maintain": 0.0, "bulk": 0.12}
 PROTEIN_PER_KG = {"cut": 2.0, "maintain": 1.5, "bulk": 1.8}
 
@@ -43,6 +74,10 @@ class Profile:
     activity: str
     goal: Goal
     meals_per_day: int = 4
+    # Посчитанный по опросу коэффициент. Если задан, используется вместо
+    # ACTIVITY[activity]: опрос точнее самооценки, но старые профили и
+    # контрольные примеры продолжают работать по ключу.
+    activity_factor: float | None = None
     pregnant: bool = False
     medical_diet: bool = False
 
@@ -113,7 +148,7 @@ def calculate(p: Profile) -> Targets:
     notes: list[str] = []
 
     bmr = bmr_mifflin(p)
-    tdee = bmr * ACTIVITY[p.activity]
+    tdee = bmr * (p.activity_factor or ACTIVITY[p.activity])
     kcal = round(tdee * (1 + GOAL_ADJ[p.goal]), -1)
 
     # 2.4 — ограничители, порядок важен
