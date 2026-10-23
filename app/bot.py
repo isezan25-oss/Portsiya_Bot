@@ -20,9 +20,9 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, KeyboardButton, Message,
                            ReplyKeyboardMarkup)
 
-from . import broadcast, db, family, recipes
+from . import broadcast, db, drinks, family, recipes
 from .core import (ACTIVITY, NotEligible, Profile, activity_factor, calculate,
-                   with_treat)
+                   treat_kcal, with_treat)
 from .planner import (format_plan, load_addons, load_recipes,
                       filter_recipes, relax_and_build)
 
@@ -30,6 +30,7 @@ logging.basicConfig(level=logging.INFO)
 
 RECIPES = load_recipes()
 ADDONS = load_addons()
+DRINKS = drinks.load()
 
 DISCLAIMER = (
     "Это не медицинский сервис. Расчёты носят справочный характер и не заменяют "
@@ -109,10 +110,9 @@ PLAN_LOCKED = ("Рецепты на сегодня уже выданы, поэт
                "Новый можно будет собрать завтра — а пока меняйте варианты "
                "сколько нужно, прежде чем просить рецепты.")
 
-# Место под наслаждение: сколько калорий бот оставляет человеку на десерт,
-# напиток или что захочется. Вычитается из дня, а не добавляется сверх нормы:
-# человек съедает столько же, просто часть выбирает сам.
-TREAT_KCAL = 150
+# «Побаловать себя»: сколько калорий отдать, считает core.treat_kcal — это
+# доля нормы, а не фиксированное число. Вычитается из дня, а не добавляется
+# сверх: человек съедает столько же, просто часть выбирает сам.
 
 # Режим «нет сил»: в план идут только блюда, которые готовятся не дольше.
 # Пустой cook_min — это продукты вроде яблока, их готовить не надо.
@@ -122,13 +122,14 @@ BTN_PLAN = "🍽 План на сегодня"
 BTN_QUICK = "😮‍💨 Нет сил: до 20 минут"
 BTN_SHOP = "🛒 Список продуктов"
 BTN_DINNER = "👩‍❤️‍👨 Ужин на двоих"
+BTN_DRINKS = "🍵 Напитки"
 BTN_PROFILE = "👤 Мой профиль"
 BTN_HELP = "❓ Помощь"
 
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_PLAN)],
               [KeyboardButton(text=BTN_QUICK), KeyboardButton(text=BTN_SHOP)],
-              [KeyboardButton(text=BTN_DINNER)],
+              [KeyboardButton(text=BTN_DINNER), KeyboardButton(text=BTN_DRINKS)],
               [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
 )
@@ -529,8 +530,8 @@ def _targets_from_row(row: dict):
 
 
 def _plan_kb(treat: bool = False) -> InlineKeyboardMarkup:
-    toggle = ("🍫 Убрать место", "treat:0") if treat else \
-             ("🍫 Оставить место", "treat:1")
+    toggle = ("🍫 Обычный план", "treat:0") if treat else \
+             ("🍫 Побаловать себя", "treat:1")
     return kb([[("Другой вариант", "replan")], [toggle],
                [("📖 Прислать рецепты", "recipes")]])
 
@@ -554,7 +555,7 @@ def _quick_pool(pool: list) -> list:
 
 async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
                      regenerate: bool = False, quick: bool = False,
-                     treat: int = 0):
+                     treat: bool = False):
     row = db.get_profile(tg_id)
     if not row:
         return await m.answer(
@@ -577,7 +578,7 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
     t = _targets_from_row(row)
     # Подбираем под урезанную норму, а показываем полную: в строке «Ваша норма»
     # должно стоять то число, которое человек видел в профиле.
-    t_food = with_treat(t, treat) if treat else t
+    t_food = with_treat(t, treat_kcal(t.kcal)) if treat else t
     pool = filter_recipes(RECIPES, _json.loads(row["exclusions"] or "[]"))
     if quick:
         pool = _quick_pool(pool)
@@ -588,13 +589,12 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
     if not plans:
         return await m.answer("\n".join(notes) or "Не удалось собрать план.")
     plan = plans[0]
-    # сколько в итоге отдали: with_treat ограничивает долю от нормы сверху
-    treat = t.kcal - t_food.kcal
-    text = format_plan(plan, t, treat_kcal=treat)
+    reserved = t.kcal - t_food.kcal
+    text = format_plan(plan, t, treat_kcal=reserved)
     if notes:
         text += "\n\n" + "\n".join(f"_{n}_" for n in notes)
     db.save_plan(tg_id, today, [i.recipe.id for i in plan.items], text,
-                 quick=quick, scales=[i.scale for i in plan.items], treat=treat)
+                 quick=quick, scales=[i.scale for i in plan.items], treat=reserved)
     if quick:
         text += f"\n\n_Режим «нет сил»: всё готовится за {MAX_QUICK_MIN} минут или быстрее._"
     # Счётчик остался, хотя ничего больше не ограничивает: по нему видно,
@@ -602,7 +602,7 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
     # кто ходит за блюдами, а не за едой.
     db.count_plan(tg_id, today)
     await m.answer(text, parse_mode=ParseMode.MARKDOWN,
-                   reply_markup=_plan_kb(bool(treat)))
+                   reply_markup=_plan_kb(bool(reserved)))
 
 
 @dp.message(Command("quick"))
@@ -625,13 +625,13 @@ async def cb_replan(c: CallbackQuery):
         return await c.answer(PLAN_LOCKED, show_alert=True)
     await _send_plan(c.message, c.from_user.id, seed=random.randint(1, 10 ** 6),
                      regenerate=True, quick=bool(saved and saved.get("quick")),
-                     treat=(saved or {}).get("treat", 0))
+                     treat=bool((saved or {}).get("treat")))
     await c.answer()
 
 
 @dp.callback_query(F.data.startswith("treat:"))
 async def cb_treat(c: CallbackQuery):
-    """Освободить в плане место под десерт или вернуть его обратно.
+    """Освободить в плане место под «побаловать себя» или вернуть обратно.
 
     Пересборка идёт через _send_plan, поэтому запрет после выдачи рецептов
     действует и здесь — отдельной проверки не нужно."""
@@ -639,7 +639,7 @@ async def cb_treat(c: CallbackQuery):
     saved = db.get_plan(c.from_user.id, date.today())
     await _send_plan(c.message, c.from_user.id, seed=random.randint(1, 10 ** 6),
                      regenerate=True, quick=bool(saved and saved.get("quick")),
-                     treat=TREAT_KCAL if c.data.endswith("1") else 0)
+                     treat=c.data.endswith("1"))
     await c.answer()
 
 
@@ -870,6 +870,80 @@ async def btn_dinner(m: Message, state: FSMContext):
     await cmd_dinner(m, state)
 
 
+# --- напитки. В план не входят: человек выбирает сам. ---
+
+DRINKS_NOTE = ("_Напитки не входят в план: бот их не считает и не навязывает. "
+               "КБЖУ указаны, чтобы вы выбирали не вслепую._\n"
+               "_Хотите вписать напиток в день — соберите план с кнопкой "
+               "«🍫 Побаловать себя», она освобождает под это место._")
+
+
+def _drinks_kb(pool: list) -> InlineKeyboardMarkup:
+    rows = [[(label, f"dcat:{key}")] for key, label in drinks.CATEGORIES
+            if any(d.category == key for d in pool)]
+    return kb(rows)
+
+
+@dp.message(Command("drinks"))
+async def cmd_drinks(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer(f"*Напитки*\n\n{DRINKS_NOTE}", parse_mode=ParseMode.MARKDOWN,
+                   reply_markup=_drinks_kb(_drink_pool(m.from_user.id)))
+
+
+@dp.message(lambda m: _pressed(m.text, BTN_DRINKS))
+async def btn_drinks(m: Message, state: FSMContext):
+    await cmd_drinks(m, state)
+
+
+def _drink_pool(tg_id: int) -> list:
+    """Напитки за вычетом аллергенов человека. Профиля может и не быть —
+    тогда показываем всё: напитки доступны и до опроса."""
+    import json as _json
+    row = db.get_profile(tg_id)
+    if not row:
+        return DRINKS
+    return drinks.allowed(DRINKS, _json.loads(row["exclusions"] or "[]"))
+
+
+@dp.callback_query(F.data.startswith("dcat:"))
+async def cb_drink_category(c: CallbackQuery):
+    key = c.data.split(":")[1]
+    pool = [d for d in _drink_pool(c.from_user.id) if d.category == key]
+    if not pool:
+        return await c.answer("В этой категории не осталось напитков без ваших "
+                              "аллергенов.", show_alert=True)
+    rows = [[(f"{d.title} · {round(d.kcal)} ккал", f"drink:{d.id}")] for d in pool]
+    rows.append([("← Категории", "dcat_back")])
+    await c.message.edit_text(
+        f"*{drinks.CATEGORY_RU[key]}*\n\n{DRINKS_NOTE}",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb(rows))
+    await c.answer()
+
+
+@dp.callback_query(F.data == "dcat_back")
+async def cb_drink_back(c: CallbackQuery):
+    await c.message.edit_text(f"*Напитки*\n\n{DRINKS_NOTE}",
+                              parse_mode=ParseMode.MARKDOWN,
+                              reply_markup=_drinks_kb(_drink_pool(c.from_user.id)))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("drink:"))
+async def cb_drink(c: CallbackQuery):
+    did = c.data.split(":")[1]
+    text = drinks.card(did)
+    if not text:
+        return await c.answer("Рецепт не нашёлся.", show_alert=True)
+    d = next((x for x in DRINKS if x.id == did), None)
+    tail = ("\n\nЭто чай или кофе без добавок — на день он практически не влияет."
+            if d and d.light else
+            "\n\nВ план не входит. Чтобы напиток поместился в день, соберите "
+            "план с кнопкой «Побаловать себя».")
+    await c.answer()
+    await c.message.answer(text + tail, reply_markup=MAIN_KB)
+
+
 @dp.message(Command("replace"))
 async def cmd_replace(m: Message):
     await _send_plan(m, m.from_user.id, seed=int(date.today().strftime("%j")) + 7,
@@ -1037,6 +1111,7 @@ async def cmd_help(m: Message):
         "/quick — план из блюд до 20 минут\n"
         "/shop — список продуктов на день\n"
         "/dinner — ужин на двоих: одно блюдо, разные порции\n"
+        "/drinks — напитки: чай, кофе и какао, смузи\n"
         "/replace — собрать другой вариант\n"
         "/profile — ваши параметры и норма\n"
         "/restart — заполнить параметры заново\n"
@@ -1097,6 +1172,7 @@ async def main():
         BotCommand(command="quick", description="План без сил: до 20 минут"),
         BotCommand(command="shop", description="Список продуктов на день"),
         BotCommand(command="dinner", description="Ужин на двоих"),
+        BotCommand(command="drinks", description="Напитки: чай, кофе, смузи"),
         BotCommand(command="replace", description="Собрать другой вариант"),
         BotCommand(command="profile", description="Параметры и норма"),
         BotCommand(command="restart", description="Заполнить параметры заново"),

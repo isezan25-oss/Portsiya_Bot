@@ -18,6 +18,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "data" / "recipes.csv"
 COLLECTION = ROOT / "docs" / "10-сборник-рецептов.md"
+DRINKS_CSV = ROOT / "data" / "drinks.csv"
+DRINKS_COLLECTION = ROOT / "docs" / "14-сборник-напитков.md"
+DRINK_CATEGORIES = {"чай", "кофе", "смузи"}
 
 ALLERGENS = {"молоко", "глютен", "яйцо", "орехи", "рыба", "соя", "арахис",
               "кунжут", "морепродукты"}
@@ -205,6 +208,38 @@ def check_ingredients(rows: list[dict]) -> None:
                                 f"а примечание внутри списка")
 
 
+def check_drinks() -> None:
+    """Напитки. В подбор они не идут, поэтому тут не теги и приёмы, а то, что
+    человек видит: категория, КБЖУ, аллергены и наличие карточки."""
+    rows = list(csv.DictReader(open(DRINKS_CSV, encoding="utf-8")))
+    text = DRINKS_COLLECTION.read_text(encoding="utf-8")
+    seen: set[str] = set()
+    for r in rows:
+        did = r["id"]
+        if did in seen:
+            errors.append(f"напитки: дубль id {did}")
+        seen.add(did)
+        if r["category"] not in DRINK_CATEGORIES:
+            errors.append(f"{did}: категория «{r['category']}» не из словаря")
+        for a in filter(None, r["allergens"].split(",")):
+            if a.strip() not in ALLERGENS:
+                errors.append(f"{did}: аллерген «{a}» не из словаря")
+        kcal, p, f, c = (num(r[k]) for k in ("kcal", "protein", "fat", "carb"))
+        calc = p * 4 + f * 9 + c * 4
+        # Чай и кофе без добавок — почти нули, там проценты бессмысленны.
+        if kcal > 20 and abs(calc - kcal) / kcal > 0.10:
+            warnings.append(f"{did}: КБЖУ расходятся с калорийностью на "
+                            f"{abs(calc - kcal) / kcal:.0%} ({calc:.0f} против {kcal:.0f})")
+        if f"`{did}`" not in text:
+            errors.append(f"{did}: нет карточки в сборнике напитков")
+    for m in re.finditer(r"\*\*id в базе:\*\*\s*`(d\d+)`", text):
+        if m.group(1) not in seen:
+            errors.append(f"{m.group(1)}: карточка есть, строки в drinks.csv нет")
+    print(f"Напитков: {len(rows)} — "
+          + ", ".join(f"{c} {sum(1 for r in rows if r['category'] == c)}"
+                      for c in sorted(DRINK_CATEGORIES)) + "\n")
+
+
 def main() -> int:
     rows = list(csv.DictReader(open(CSV_PATH, encoding="utf-8")))
     print(f"Позиций в базе: {len(rows)}, из них авторских рецептов: "
@@ -212,6 +247,7 @@ def main() -> int:
     check_rows(rows)
     check_collection(rows)
     check_ingredients(rows)
+    check_drinks()
 
     for w in warnings:
         print(f"  ! {w}")

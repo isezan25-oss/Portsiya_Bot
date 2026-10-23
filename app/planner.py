@@ -325,10 +325,10 @@ def format_plan(plan: Plan, targets: Targets, treat_kcal: int = 0) -> str:
     if plan.addon:
         lines.append(f"*Добавка*\n{plan.addon.title} — {round(plan.addon.kcal)} ккал")
     if treat_kcal:
-        # Пример нужен, чтобы число было осязаемым: 150 ккал — это капучино
-        # с парой долек шоколада, а не торт, и лучше сказать об этом сразу.
-        lines.append(f"*Место под наслаждение*\n{treat_kcal} ккал на что "
-                     f"захочется — скажем, капучино и пара долек шоколада")
+        # Пример нужен, чтобы число было осязаемым: двести ккал — это латте с
+        # парой долек шоколада, а не торт, и лучше сказать об этом сразу.
+        lines.append(f"*Побаловать себя*\n{treat_kcal} ккал на что захочется — "
+                     f"скажем, латте и пара долек шоколада. Или напиток из /drinks")
     eaten = (f"{round(plan.kcal)} + {treat_kcal} = {round(plan.kcal) + treat_kcal} ккал"
              if treat_kcal else f"{round(plan.kcal)} ккал")
     total = (f"\n*Итого за день*\n{eaten}  ·  Б {round(plan.protein)} г  ·  "
