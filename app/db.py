@@ -208,6 +208,8 @@ def get_plan(tg_id: int, plan_date: date) -> dict | None:
 
 
 def plans_today(tg_id: int, day: date) -> int:
+    """Сколько планов собрано за сутки. Суточного лимита больше нет, но счёт
+    ведётся: по нему видно, кто ходит в бот за блюдами, а не за едой."""
     with connect() as c:
         row = c.execute("SELECT plans FROM daily_usage WHERE telegram_id=? AND usage_date=?",
                         (tg_id, day.isoformat())).fetchone()
@@ -282,7 +284,9 @@ def collectors(limit: int = 15) -> list[dict]:
             SELECT telegram_id,
                    COUNT(*) AS unique_recipes,
                    SUM(times) AS deliveries,
-                   MIN(first_sent) AS started
+                   MIN(first_sent) AS started,
+                   (SELECT SUM(plans) FROM daily_usage u
+                     WHERE u.telegram_id = recipe_log.telegram_id) AS plans
             FROM recipe_log GROUP BY telegram_id
             ORDER BY unique_recipes DESC LIMIT ?""", (limit,)).fetchall()
     return [dict(r) for r in rows]

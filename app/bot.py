@@ -100,10 +100,13 @@ TRAINING_HINT = (
 )
 
 
-# Сколько раз в сутки можно собрать новый план. Просмотр уже собранного
-# не считается. Счётчик переживает /delete — иначе лимит обходится
-# удалением профиля и повторным /start.
-DAILY_PLAN_LIMIT = 3
+# Суточного лимита подборов нет: человек пересобирает план, пока тот ему не
+# подойдёт. Единственная граница — рецепты. Как только они выданы, план на
+# сегодня зафиксирован: замена после этого означала бы выдачу новой порции
+# карточек из сборника, а это и есть то, от чего его бережём.
+PLAN_LOCKED = ("Рецепты на сегодня уже выданы, поэтому план закреплён. "
+               "Новый можно будет собрать завтра — а пока меняйте варианты "
+               "сколько нужно, прежде чем просить рецепты.")
 
 # Режим «нет сил»: в план идут только блюда, которые готовятся не дольше.
 # Пустой cook_min — это продукты вроде яблока, их готовить не надо.
@@ -554,12 +557,11 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
         # Уже собранный план показываем как есть: просмотр попытку не тратит.
         return await m.answer(saved["text"], parse_mode=ParseMode.MARKDOWN,
                               reply_markup=PLAN_BUTTONS)
-    # Владелец вне лимита: ему нужно проверять бота, а не экономить попытки.
-    if not _is_admin(tg_id) and db.plans_today(tg_id, today) >= DAILY_PLAN_LIMIT:
-        return await m.answer(
-            f"На сегодня лимит: {DAILY_PLAN_LIMIT} подбора в день. "
-            f"Завтра соберу новый план.\n\n"
-            f"Показать сегодняшний — «{BTN_PLAN}».", reply_markup=MAIN_KB)
+    # Проверка здесь, а не только в кнопке «Другой вариант»: пересобрать план
+    # можно ещё четырьмя путями — /plan, /quick, /replace и кнопки, — и без
+    # общей проверки блокировка обходилась бы любым из них.
+    if saved and saved.get("accepted") and not _is_admin(tg_id):
+        return await m.answer(PLAN_LOCKED, reply_markup=MAIN_KB)
     import json as _json
     t = _targets_from_row(row)
     pool = filter_recipes(RECIPES, _json.loads(row["exclusions"] or "[]"))
@@ -579,11 +581,10 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
                  quick=quick, scales=[i.scale for i in plan.items])
     if quick:
         text += f"\n\n_Режим «нет сил»: всё готовится за {MAX_QUICK_MIN} минут или быстрее._"
-    used = db.count_plan(tg_id, today)
-    left = DAILY_PLAN_LIMIT - used
-    if left <= 1:
-        text += (f"\n\n_Это последний подбор на сегодня._" if left == 1
-                 else "")
+    # Счётчик остался, хотя ничего больше не ограничивает: по нему видно,
+    # сколько раз человек пересобирает план, и он же показывает в /stats тех,
+    # кто ходит за блюдами, а не за едой.
+    db.count_plan(tg_id, today)
     await m.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=PLAN_BUTTONS)
 
 
@@ -601,10 +602,10 @@ async def cmd_plan(m: Message):
 async def cb_replan(c: CallbackQuery):
     import random
     saved = db.get_plan(c.from_user.id, date.today())
-    if saved and saved.get("accepted"):
-        return await c.answer(
-            "Рецепты на сегодня уже выданы — менять план можно до этого. "
-            "Новый план будет завтра.", show_alert=True)
+    if saved and saved.get("accepted") and not _is_admin(c.from_user.id):
+        # Тот же запрет, что и в _send_plan, но всплывающим окном: на нажатие
+        # кнопки так отвечать уместнее, чем ещё одним сообщением в чат.
+        return await c.answer(PLAN_LOCKED, show_alert=True)
     await _send_plan(c.message, c.from_user.id, seed=random.randint(1, 10 ** 6),
                      regenerate=True, quick=bool(saved and saved.get("quick")))
     await c.answer()
@@ -883,6 +884,7 @@ async def cmd_stats(m: Message):
         flag = " (!)" if share >= 0.5 else ""
         lines.append(f"{r['telegram_id']}: {r['unique_recipes']} "
                      f"({share:.0%}), выдач {r['deliveries']}, "
+                     f"подборов {r['plans'] or 0}, "
                      f"с {r['started'][:10]}{flag}")
     await m.answer("\n".join(lines))
 
