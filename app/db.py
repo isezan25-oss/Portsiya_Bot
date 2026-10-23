@@ -366,6 +366,28 @@ def audience() -> int:
         return c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
 
+def overview(days: int = 7) -> dict[str, int]:
+    """Сводка для /stats: сколько людей в боте и сколько из них живые.
+
+    Пользователь появляется в `users` при первом /start, профиль — только после
+    полного опроса, поэтому разрыв между этими числами показывает, сколько
+    человек бросили анкету на середине."""
+    since = (date.today() - timedelta(days=days)).isoformat()
+    with connect() as c:
+        q = lambda sql, *a: c.execute(sql, a).fetchone()[0]
+        return {
+            "users": q("SELECT COUNT(*) FROM users"),
+            "profiles": q("SELECT COUNT(*) FROM profiles"),
+            "new": q("SELECT COUNT(*) FROM users WHERE date(created_at) >= ?", since),
+            "with_recipes": q("SELECT COUNT(DISTINCT telegram_id) FROM recipe_log"),
+            "active": q("SELECT COUNT(DISTINCT telegram_id) FROM daily_usage "
+                        "WHERE usage_date >= ?", since),
+            "today": q("SELECT COUNT(DISTINCT telegram_id) FROM daily_usage "
+                       "WHERE usage_date = ?", date.today().isoformat()),
+            "days": days,
+        }
+
+
 def mark_delivery(bid: int, tg_id: int, status: str, detail: str = "") -> None:
     with connect() as c:
         c.execute("INSERT INTO broadcast_delivery"

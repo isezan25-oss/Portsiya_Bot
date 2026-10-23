@@ -981,10 +981,21 @@ async def cmd_stats(m: Message):
     if not _is_admin(m.from_user.id):
         return
     total = len([r for r in RECIPES if r.kind != "product"])
+    o = db.overview()
+    # Разрыв между «всего» и «дошли до конца опроса» — это брошенные анкеты,
+    # поэтому оба числа показываем рядом, а не одно вместо другого.
+    lines = [f"*Люди*",
+             f"Всего: {o['users']} · дошли до конца опроса: {o['profiles']}",
+             f"Новых за {o['days']} дней: {o['new']}",
+             f"Собирали план: сегодня {o['today']}, "
+             f"за {o['days']} дней {o['active']}",
+             f"Получали рецепты: {o['with_recipes']}", ""]
+
     rows = db.collectors()
     if not rows:
-        return await m.answer("Рецепты пока никому не выдавались.")
-    lines = [f"Собрано рецептов из {total}:"]
+        lines.append("Рецепты пока никому не выдавались.")
+        return await m.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    lines.append(f"*Собрано рецептов из {total}*")
     for r in rows:
         share = r["unique_recipes"] / total
         flag = " (!)" if share >= 0.5 else ""
@@ -992,7 +1003,7 @@ async def cmd_stats(m: Message):
                      f"({share:.0%}), выдач {r['deliveries']}, "
                      f"подборов {r['plans'] or 0}, "
                      f"с {r['started'][:10]}{flag}")
-    await m.answer("\n".join(lines))
+    await m.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
 # --- рассылка объявлений. Только владельцу. ---
