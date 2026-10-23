@@ -4,6 +4,7 @@ DDL совместим, меняется только строка подклю�
 """
 import json
 import os
+import re
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -87,6 +88,17 @@ CREATE TABLE IF NOT EXISTS partners (
     carb_g      INTEGER
 );
 
+-- Промокод партнёра. Доступа он не открывает — бот бесплатный, — а помечает,
+-- откуда пришёл человек, и ограничивает размер когорты числом, которое
+-- назначаем мы, а не решением партнёра.
+CREATE TABLE IF NOT EXISTS promo_codes (
+    code       TEXT PRIMARY KEY,
+    partner    TEXT NOT NULL DEFAULT '',
+    limit_n    INTEGER NOT NULL DEFAULT 0,   -- 0 — без лимита
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS broadcasts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     text       TEXT NOT NULL,
@@ -136,6 +148,9 @@ def _migrate(c) -> None:
     have = {r["name"] for r in c.execute("PRAGMA table_info(profiles)")}
     if "activity_factor" not in have:
         c.execute("ALTER TABLE profiles ADD COLUMN activity_factor REAL")
+    have = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
+    if "source" not in have:
+        c.execute("ALTER TABLE users ADD COLUMN source TEXT")
 
 
 def init() -> None:
@@ -364,6 +379,68 @@ def broadcast_targets(bid: int) -> list[int]:
 def audience() -> int:
     with connect() as c:
         return c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+
+CODE_RE = re.compile(r"^[A-ZА-Я0-9-]{3,32}$")
+
+
+def create_code(code: str, limit_n: int = 0, partner: str = "") -> bool:
+    code = code.strip().upper()
+    if not CODE_RE.match(code):
+        return False
+    with connect() as c:
+        c.execute("INSERT INTO promo_codes (code, partner, limit_n) VALUES (?,?,?) "
+                  "ON CONFLICT(code) DO UPDATE SET partner=excluded.partner, "
+                  "limit_n=excluded.limit_n, active=1",
+                  (code, partner, max(limit_n, 0)))
+    return True
+
+
+def codes() -> list[dict]:
+    """Коды с числом активаций. Считаем по users, а не отдельным счётчиком:
+    счётчик рано или поздно разъезжается с фактом, запрос — никогда."""
+    with connect() as c:
+        rows = c.execute("""
+            SELECT p.*, (SELECT COUNT(*) FROM users u WHERE u.source = p.code) AS used
+            FROM promo_codes p ORDER BY p.created_at DESC""").fetchall()
+    return [dict(r) for r in rows]
+
+
+def attach_source(tg_id: int, code: str) -> str:
+    """Привязывает человека к промокоду. Возвращает причину исхода.
+
+    Первое касание выигрывает: если источник уже записан, второй код его не
+    перебивает — иначе партнёр, разославший ссылку позже, забирал бы чужих
+    людей себе в отчёт."""
+    code = (code or "").strip().upper()
+    ensure_user(tg_id)
+    with connect() as c:
+        row = c.execute("SELECT * FROM promo_codes WHERE code=? AND active=1",
+                        (code,)).fetchone()
+        if not row:
+            return "unknown"
+        cur = c.execute("SELECT source FROM users WHERE telegram_id=?",
+                        (tg_id,)).fetchone()
+        if cur and cur["source"]:
+            return "already"
+        used = c.execute("SELECT COUNT(*) FROM users WHERE source=?", (code,)).fetchone()[0]
+        if row["limit_n"] and used >= row["limit_n"]:
+            return "full"
+        c.execute("UPDATE users SET source=? WHERE telegram_id=?", (code, tg_id))
+    return "ok"
+
+
+def by_source() -> list[dict]:
+    """Сколько людей пришло из каждого источника и сколько из них дошли до
+    готового профиля — это и есть отчёт партнёру."""
+    with connect() as c:
+        rows = c.execute("""
+            SELECT COALESCE(u.source, '—') AS source,
+                   COUNT(*) AS people,
+                   SUM(CASE WHEN p.telegram_id IS NOT NULL THEN 1 ELSE 0 END) AS profiles
+            FROM users u LEFT JOIN profiles p ON p.telegram_id = u.telegram_id
+            GROUP BY COALESCE(u.source, '—') ORDER BY people DESC""").fetchall()
+    return [dict(r) for r in rows]
 
 
 def overview(days: int = 7) -> dict[str, int]:

@@ -12,7 +12,7 @@ from datetime import date
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -222,8 +222,12 @@ async def _ask_sex(m: Message, state: FSMContext):
 
 
 @dp.message(Command("start"))
-async def cmd_start(m: Message, state: FSMContext):
+async def cmd_start(m: Message, state: FSMContext, command: CommandObject = None):
     db.ensure_user(m.from_user.id)
+    # Промокод приходит из ссылки вида t.me/бот?start=КОД — человеку ничего не
+    # нужно вводить руками, а партнёру достаточно опубликовать одну ссылку.
+    if command and command.args:
+        _note_promo(m.from_user.id, command.args)
     row = db.get_profile(m.from_user.id)
     if row:
         # Профиль уже заполнен — не гонять человека по шести вопросам заново.
@@ -991,6 +995,14 @@ async def cmd_stats(m: Message):
              f"за {o['days']} дней {o['active']}",
              f"Получали рецепты: {o['with_recipes']}", ""]
 
+    src = [r for r in db.by_source() if r["source"] != "—"]
+    if src:
+        lines.append("*Откуда пришли*")
+        for r in src:
+            lines.append(f"`{r['source']}`: {r['people']} чел., "
+                         f"дошли до профиля {r['profiles']}")
+        lines.append("")
+
     rows = db.collectors()
     if not rows:
         lines.append("Рецепты пока никому не выдавались.")
@@ -1003,6 +1015,75 @@ async def cmd_stats(m: Message):
                      f"({share:.0%}), выдач {r['deliveries']}, "
                      f"подборов {r['plans'] or 0}, "
                      f"с {r['started'][:10]}{flag}")
+    await m.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+# --- промокоды партнёров. Доступа не открывают: бот бесплатный. Они помечают,
+# откуда пришёл человек, и держат размер когорты в рамках. ---
+
+
+def _note_promo(tg_id: int, code: str) -> str:
+    status = db.attach_source(tg_id, code)
+    logging.info("промокод %s: user=%s -> %s", code, tg_id, status)
+    return status
+
+
+@dp.message(Command("promo"))
+async def cmd_promo(m: Message, command: CommandObject):
+    """Для тех, кто уже пользовался ботом до того, как партнёр дал код."""
+    if not command.args:
+        return await m.answer("Отправьте код после команды, например: "
+                              "/promo DDX", reply_markup=MAIN_KB)
+    status = _note_promo(m.from_user.id, command.args)
+    # «Кончился» и «неизвестен» человеку не различаем: он ни в том, ни в другом
+    # не виноват, пользоваться ботом ему это не мешает, а объяснять устройство
+    # когорт незачем.
+    answer = {
+        "ok": "Код принят, спасибо. Пользуйтесь на здоровье.",
+        "already": "Код у вас уже отмечен — повторно не нужно.",
+    }.get(status, "Такой код не подошёл, но это ничего не меняет: "
+                  "бот работает и так. Нажмите /start.")
+    await m.answer(answer, reply_markup=MAIN_KB)
+
+
+@dp.message(Command("newcode"))
+async def cmd_newcode(m: Message, command: CommandObject):
+    """Создать код: /newcode DDX500 500 DDX Fitness"""
+    if not _is_admin(m.from_user.id):
+        return
+    parts = (command.args or "").split(maxsplit=2)
+    if len(parts) < 2 or not parts[1].isdigit():
+        return await m.answer(
+            "Формат: `/newcode КОД ЛИМИТ Название партнёра`\n"
+            "Лимит 0 — без ограничения.\n\n"
+            "Пример: `/newcode DDX500 500 DDX Fitness`",
+            parse_mode=ParseMode.MARKDOWN)
+    code, limit = parts[0].upper(), int(parts[1])
+    partner = parts[2] if len(parts) > 2 else ""
+    if not db.create_code(code, limit, partner):
+        return await m.answer("Код должен быть из букв, цифр и дефисов, "
+                              "от 3 до 32 знаков.")
+    me = await m.bot.me()
+    await m.answer(
+        f"Код *{code}* готов, лимит {limit or '∞'}.\n\n"
+        f"Ссылка для партнёра:\n`https://t.me/{me.username}?start={code}`\n\n"
+        f"По ней код применяется сам — вводить ничего не нужно.",
+        parse_mode=ParseMode.MARKDOWN)
+
+
+@dp.message(Command("codes"))
+async def cmd_codes(m: Message):
+    if not _is_admin(m.from_user.id):
+        return
+    rows = db.codes()
+    if not rows:
+        return await m.answer("Кодов пока нет. Создать — /newcode")
+    lines = ["*Промокоды*"]
+    for r in rows:
+        limit = r["limit_n"] or "∞"
+        full = " — набран" if r["limit_n"] and r["used"] >= r["limit_n"] else ""
+        lines.append(f"`{r['code']}` {r['used']}/{limit}{full}"
+                     + (f" · {r['partner']}" if r["partner"] else ""))
     await m.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
@@ -1198,6 +1279,7 @@ async def main():
         await bot.set_my_commands(
             [BotCommand(command="stats", description="Кто сколько рецептов собрал"),
              BotCommand(command="announce", description="Разослать объявление"),
+             BotCommand(command="codes", description="Промокоды партнёров"),
              BotCommand(command="plan", description="План питания на сегодня"),
              BotCommand(command="quick", description="План без сил: до 20 минут"),
              BotCommand(command="profile", description="Параметры и норма"),
