@@ -190,9 +190,11 @@ def set_prefer_tags(tg_id: int, items: list[str]) -> None:
 
 
 def save_plan(tg_id: int, plan_date: date, recipe_ids: list[str], text: str,
-              quick: bool = False, scales: list[float] | None = None) -> None:
+              quick: bool = False, scales: list[float] | None = None,
+              treat: int = 0) -> None:
     payload = json.dumps({"recipe_ids": recipe_ids, "text": text, "quick": quick,
-                          "scales": scales or [1.0] * len(recipe_ids)},
+                          "scales": scales or [1.0] * len(recipe_ids),
+                          "treat": treat},
                          ensure_ascii=False)
     with connect() as c:
         c.execute("""INSERT INTO plans (telegram_id, plan_date, payload) VALUES (?,?,?)

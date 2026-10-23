@@ -310,7 +310,9 @@ def relax_and_build(targets: Targets, recipes: list[Recipe], addons: list[Addon]
     return [], ["Не удалось собрать план под эту норму: база рецептов пока мала."]
 
 
-def format_plan(plan: Plan, targets: Targets) -> str:
+def format_plan(plan: Plan, targets: Targets, treat_kcal: int = 0) -> str:
+    """targets — полная норма человека, не урезанная под наслаждение: иначе в
+    строке «Ваша норма» окажется число, которого он никогда не видел."""
     lines = []
     for item in plan.items:
         r = item.recipe
@@ -322,7 +324,14 @@ def format_plan(plan: Plan, targets: Targets) -> str:
         lines.append(f"*{MEAL_RU[item.meal]}*\n{r.title}{portion} — {round(item.kcal)} ккал")
     if plan.addon:
         lines.append(f"*Добавка*\n{plan.addon.title} — {round(plan.addon.kcal)} ккал")
-    total = (f"\n*Итого за день*\n{round(plan.kcal)} ккал  ·  Б {round(plan.protein)} г  ·  "
+    if treat_kcal:
+        # Пример нужен, чтобы число было осязаемым: 150 ккал — это капучино
+        # с парой долек шоколада, а не торт, и лучше сказать об этом сразу.
+        lines.append(f"*Место под наслаждение*\n{treat_kcal} ккал на что "
+                     f"захочется — скажем, капучино и пара долек шоколада")
+    eaten = (f"{round(plan.kcal)} + {treat_kcal} = {round(plan.kcal) + treat_kcal} ккал"
+             if treat_kcal else f"{round(plan.kcal)} ккал")
+    total = (f"\n*Итого за день*\n{eaten}  ·  Б {round(plan.protein)} г  ·  "
              f"Ж {round(plan.fat)} г  ·  У {round(plan.carb)} г\n"
              f"_Ваша норма: {targets.kcal} ккал, белок {targets.protein_g} г_")
     return "\n\n".join(lines) + "\n" + total

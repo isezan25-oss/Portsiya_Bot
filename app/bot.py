@@ -21,7 +21,8 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
                            ReplyKeyboardMarkup)
 
 from . import broadcast, db, family, recipes
-from .core import ACTIVITY, NotEligible, Profile, activity_factor, calculate
+from .core import (ACTIVITY, NotEligible, Profile, activity_factor, calculate,
+                   with_treat)
 from .planner import (format_plan, load_addons, load_recipes,
                       filter_recipes, relax_and_build)
 
@@ -107,6 +108,11 @@ TRAINING_HINT = (
 PLAN_LOCKED = ("Рецепты на сегодня уже выданы, поэтому план закреплён. "
                "Новый можно будет собрать завтра — а пока меняйте варианты "
                "сколько нужно, прежде чем просить рецепты.")
+
+# Место под наслаждение: сколько калорий бот оставляет человеку на десерт,
+# напиток или что захочется. Вычитается из дня, а не добавляется сверх нормы:
+# человек съедает столько же, просто часть выбирает сам.
+TREAT_KCAL = 150
 
 # Режим «нет сил»: в план идут только блюда, которые готовятся не дольше.
 # Пустой cook_min — это продукты вроде яблока, их готовить не надо.
@@ -522,7 +528,11 @@ def _targets_from_row(row: dict):
                    water_ml=round(row["weight_kg"] * 30), notes=[])
 
 
-PLAN_BUTTONS = kb([[("Другой вариант", "replan")], [("📖 Прислать рецепты", "recipes")]])
+def _plan_kb(treat: bool = False) -> InlineKeyboardMarkup:
+    toggle = ("🍫 Убрать место", "treat:0") if treat else \
+             ("🍫 Оставить место", "treat:1")
+    return kb([[("Другой вариант", "replan")], [toggle],
+               [("📖 Прислать рецепты", "recipes")]])
 
 
 async def _send_throttled(m: Message, text: str, pause: float = 1.0) -> None:
@@ -543,7 +553,8 @@ def _quick_pool(pool: list) -> list:
 
 
 async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
-                     regenerate: bool = False, quick: bool = False):
+                     regenerate: bool = False, quick: bool = False,
+                     treat: int = 0):
     row = db.get_profile(tg_id)
     if not row:
         return await m.answer(
@@ -554,9 +565,9 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
     today = date.today()
     saved = db.get_plan(tg_id, today)
     if saved and not regenerate:
-        # Уже собранный план показываем как есть: просмотр попытку не тратит.
+        # Уже собранный план показываем как есть: пересборку он не запускает.
         return await m.answer(saved["text"], parse_mode=ParseMode.MARKDOWN,
-                              reply_markup=PLAN_BUTTONS)
+                              reply_markup=_plan_kb(bool(saved.get("treat"))))
     # Проверка здесь, а не только в кнопке «Другой вариант»: пересобрать план
     # можно ещё четырьмя путями — /plan, /quick, /replace и кнопки, — и без
     # общей проверки блокировка обходилась бы любым из них.
@@ -564,28 +575,34 @@ async def _send_plan(m: Message, tg_id: int, seed: int | None = None,
         return await m.answer(PLAN_LOCKED, reply_markup=MAIN_KB)
     import json as _json
     t = _targets_from_row(row)
+    # Подбираем под урезанную норму, а показываем полную: в строке «Ваша норма»
+    # должно стоять то число, которое человек видел в профиле.
+    t_food = with_treat(t, treat) if treat else t
     pool = filter_recipes(RECIPES, _json.loads(row["exclusions"] or "[]"))
     if quick:
         pool = _quick_pool(pool)
     plans, notes = relax_and_build(
-        t, pool, ADDONS, meals=row["meals_per_day"],
+        t_food, pool, ADDONS, meals=row["meals_per_day"],
         recent_ids=db.recent_recipe_ids(tg_id),
         prefer_tags=_json.loads(row["prefer_tags"] or "[]"), seed=seed)
     if not plans:
         return await m.answer("\n".join(notes) or "Не удалось собрать план.")
     plan = plans[0]
-    text = format_plan(plan, t)
+    # сколько в итоге отдали: with_treat ограничивает долю от нормы сверху
+    treat = t.kcal - t_food.kcal
+    text = format_plan(plan, t, treat_kcal=treat)
     if notes:
         text += "\n\n" + "\n".join(f"_{n}_" for n in notes)
     db.save_plan(tg_id, today, [i.recipe.id for i in plan.items], text,
-                 quick=quick, scales=[i.scale for i in plan.items])
+                 quick=quick, scales=[i.scale for i in plan.items], treat=treat)
     if quick:
         text += f"\n\n_Режим «нет сил»: всё готовится за {MAX_QUICK_MIN} минут или быстрее._"
     # Счётчик остался, хотя ничего больше не ограничивает: по нему видно,
     # сколько раз человек пересобирает план, и он же показывает в /stats тех,
     # кто ходит за блюдами, а не за едой.
     db.count_plan(tg_id, today)
-    await m.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=PLAN_BUTTONS)
+    await m.answer(text, parse_mode=ParseMode.MARKDOWN,
+                   reply_markup=_plan_kb(bool(treat)))
 
 
 @dp.message(Command("quick"))
@@ -607,7 +624,22 @@ async def cb_replan(c: CallbackQuery):
         # кнопки так отвечать уместнее, чем ещё одним сообщением в чат.
         return await c.answer(PLAN_LOCKED, show_alert=True)
     await _send_plan(c.message, c.from_user.id, seed=random.randint(1, 10 ** 6),
-                     regenerate=True, quick=bool(saved and saved.get("quick")))
+                     regenerate=True, quick=bool(saved and saved.get("quick")),
+                     treat=(saved or {}).get("treat", 0))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("treat:"))
+async def cb_treat(c: CallbackQuery):
+    """Освободить в плане место под десерт или вернуть его обратно.
+
+    Пересборка идёт через _send_plan, поэтому запрет после выдачи рецептов
+    действует и здесь — отдельной проверки не нужно."""
+    import random
+    saved = db.get_plan(c.from_user.id, date.today())
+    await _send_plan(c.message, c.from_user.id, seed=random.randint(1, 10 ** 6),
+                     regenerate=True, quick=bool(saved and saved.get("quick")),
+                     treat=TREAT_KCAL if c.data.endswith("1") else 0)
     await c.answer()
 
 
